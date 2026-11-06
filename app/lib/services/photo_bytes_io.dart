@@ -148,12 +148,20 @@ Future<Uint8List?> readFileHeader(String path, int n) async {
 /// keeps it responsive.
 Future<Uint8List> encodeRgbaJpg(
     int width, int height, Uint8List rgba, int quality) async {
+  // MOVE (not copy) the ~78 MB RGBA buffer into the background isolate.
+  // `Isolate.run` captures `rgba` BY COPY, which doubled the buffer for a
+  // 300-DPI 12×18 sheet (3600×5400 px = ~78 MB each). That spike tripped
+  // iOS's memory watchdog and the app was killed the instant the customer
+  // tapped "Pay" (crash in the "Preparing print sheets…" stage).
+  // TransferableTypedData hands the bytes to the isolate with ZERO copy, so
+  // only one ~78 MB buffer ever exists.
+  final transfer = TransferableTypedData.fromList([rgba]);
   return Isolate.run(() {
+    final moved = transfer.materialize().asUint8List();
     final image = img.Image.fromBytes(
       width: width,
       height: height,
-      bytes: rgba.buffer,
-      bytesOffset: rgba.offsetInBytes,
+      bytes: moved.buffer,
       order: img.ChannelOrder.rgba,
     );
     return Uint8List.fromList(img.encodeJpg(image, quality: quality));

@@ -69,7 +69,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       //    this is what reaches the merchant's OneDrive print queue.
       if (cachedBytes != null) {
         _setStage('Preparing print sheets…');
-        final jpgs = await SheetPdfService.rasterizeToJpgs(cachedBytes);
+        final jpgs = await SheetPdfService.rasterizeToJpgs(
+          cachedBytes,
+          pageCount: pack.sheetsNeeded,
+        );
         var lastPct = -1;
         await OrderRepository.instance.uploadSheets(
           orderId: created.orderId,

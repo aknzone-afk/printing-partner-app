@@ -108,16 +108,33 @@ class SheetPdfService {
     Uint8List pdfBytes, {
     double dpi = 300,
     int quality = 92,
+    int? pageCount,
     void Function(int done)? onProgress,
   }) async {
     final jpgs = <Uint8List>[];
-    await for (final page in Printing.raster(pdfBytes, dpi: dpi)) {
-      final jpg = await encodeRgbaJpg(
-          page.width, page.height, page.pixels, quality);
-      jpgs.add(jpg);
-      onProgress?.call(jpgs.length);
-      // Yield so progress paints between (large) sheets.
-      await Future<void>.delayed(Duration.zero);
+    if (pageCount != null && pageCount > 0) {
+      // Raster ONE sheet at a time. Each 12×18 sheet at 300 DPI is a
+      // 3600×5400 px / ~78 MB RGBA bitmap; letting the all-pages stream hold
+      // several of these at once (plus the photos already in memory) tripped
+      // iOS's memory watchdog and crashed the app right after "Pay". Driving
+      // the rasteriser page-by-page caps peak memory at a single sheet.
+      for (var i = 0; i < pageCount; i++) {
+        await for (final page
+            in Printing.raster(pdfBytes, pages: [i], dpi: dpi)) {
+          jpgs.add(await encodeRgbaJpg(
+              page.width, page.height, page.pixels, quality));
+          onProgress?.call(jpgs.length);
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+    } else {
+      await for (final page in Printing.raster(pdfBytes, dpi: dpi)) {
+        jpgs.add(await encodeRgbaJpg(
+            page.width, page.height, page.pixels, quality));
+        onProgress?.call(jpgs.length);
+        // Yield so progress paints between (large) sheets.
+        await Future<void>.delayed(Duration.zero);
+      }
     }
     debugPrint('[SheetPdf] rasterised ${jpgs.length} sheet JPG(s) @ ${dpi.toInt()} DPI');
     return jpgs;
