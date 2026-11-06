@@ -69,7 +69,7 @@ jobs:
       - name: Flutter dependencies
         working-directory: app
         run: |
-          flutter config --no-analytics --enable-swift-package-manager
+          flutter config --no-analytics --no-enable-swift-package-manager
           flutter --version
           flutter pub get
           flutter precache --ios
