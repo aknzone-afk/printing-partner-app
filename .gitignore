@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+.env.*
+*.jks
+*.keystore
+*.p8
+*.pem
+key.properties
+local.properties
+
+# Flutter / build output
+app/build/
+app/.dart_tool/
+app/ios/Pods/
+app/ios/.symlinks/
+app/android/.gradle/
+*.iml
+.idea/
+
+app/flutter_0*.log
+app/*.log
+google-services.json

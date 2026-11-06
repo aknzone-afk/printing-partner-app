@@ -1,0 +1,101 @@
+name: printing_partner
+description: "Printing Partner - photo prints delivered to your door"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # State management — keeps the codebase simple and readable for the user
+  provider: ^6.1.2
+
+  # Routing — modern Flutter navigation
+  go_router: ^14.6.2
+
+  # Picking photos from gallery / camera (works without backend)
+  image_picker: ^1.1.2
+
+  # Custom asset picker with HARD selection-limit enforcement (the OS gallery
+  # on Android — especially MIUI — ignores image_picker's `limit` parameter
+  # and silently lets the user pick more than allowed). This package shows a
+  # checkmark-based grid that disables further selection once the cap is hit.
+  wechat_assets_picker: ^9.5.0
+  photo_manager: ^3.6.0
+
+  # Local image preview / cached display
+  cached_network_image: ^3.4.1
+
+  # HTTP for the public Indian pincode → city/state lookup
+  http: ^1.2.2
+
+  # PDF generation for the merchant 12×18 print sheets
+  pdf: ^3.11.1
+
+  # Image resize + re-encode (keeps PDF small / under 6MB)
+  image: ^4.3.0
+
+  # Utility
+  intl: ^0.20.1
+
+  # Persists order metadata across browser refreshes (localStorage on web)
+  shared_preferences: ^2.3.3
+
+  # Persists print-ready PDF bytes (too large for localStorage) — IndexedDB
+  # on web is shared across tabs of the same origin
+  idb_shim: ^2.6.5
+
+  # Native image codec — transcodes HEIC/HEIF (the default iPhone capture
+  # format) to JPEG so the pure-Dart `image` package can decode iOS photos
+  # when building the print sheets.
+  flutter_image_compress: ^2.4.0
+
+  # Native PDF share/print on iOS & Android (system share sheet). The web
+  # build still uses the dart:html blob download in pdf_download_web.dart.
+  printing: ^5.14.3
+  share_plus: ^13.2.0
+  firebase_core: ^4.11.0
+  firebase_auth: ^6.5.4
+  cloud_firestore: ^6.6.0
+  flutter_secure_storage: ^10.3.1
+
+  # Will be added in week 2 once Firebase project is created:
+  # firebase_core: ^3.8.0
+  # firebase_auth: ^5.3.4
+  # cloud_firestore: ^5.5.0
+  # firebase_storage: ^12.3.7
+
+  # Will be added in week 4:
+  # razorpay_flutter: ^1.4.0
+
+  # Will be added in week 5:
+  # http: ^1.2.2 # for Shiprocket API
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    # 26 curated sample photos shipped inside the APK so product cards
+    # render instantly with zero network requests at app startup.
+    - assets/sample_photos/
+
+# App icon generation. Regenerate both platforms with:
+#   dart run flutter_launcher_icons
+# Source artwork lives in assets/icon/ (app_icon.png = full-bleed 1024²;
+# app_icon_foreground.png = padded polaroid for Android adaptive icons).
+flutter_launcher_icons:
+  image_path: "assets/icon/app_icon.png"
+  ios: true
+  remove_alpha_ios: true
+  android: "ic_launcher"
+  adaptive_icon_background: "#FF6F61"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
