@@ -42,6 +42,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// upload RESUMES the upload instead of minting a SECOND order (honours the
   /// "never create duplicate orders" rule).
   String? _placedOrderId;
+  Map<String, dynamic>? _placedProof;
 
   @override
   void initState() {
@@ -70,6 +71,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _attachAndVerify() async {
     if (_busy) return; // re-entrancy guard (double-tap / fast re-tap)
+
+    // Already paid + order created, but a prior sheet upload failed: resume the
+    // upload directly — don't make the customer re-pick / re-verify the
+    // screenshot, and never create a second order.
+    if (_placedOrderId != null) {
+      setState(() {
+        _busy = true;
+        _error = null;
+        _stage = 'Finishing your order…';
+      });
+      try {
+        await _placeOrder(
+            upiProof:
+                _placedProof ?? {'method': 'upi', 'geminiVerified': true});
+      } catch (e) {
+        debugPrint('[Checkout] resume failed: $e');
+        if (mounted) {
+          setState(() {
+            _busy = false;
+            _stage = '';
+            _error = 'Still finishing your print sheets — tap to retry.';
+          });
+        }
+      }
+      return;
+    }
+
     final rupees = (_authoritativePaise ?? context.read<Cart>().totalPaise) / 100.0;
 
     // 1. Pick the payment screenshot.
@@ -189,6 +217,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
       orderId = created.orderId;
       _placedOrderId = orderId; // survive a later sheet-upload failure
+      _placedProof = upiProof;
     }
 
     // 2. Rasterise + upload the print sheets (per-chunk set() is idempotent,

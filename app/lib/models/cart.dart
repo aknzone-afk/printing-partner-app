@@ -36,10 +36,17 @@ class Cart extends ChangeNotifier {
   }
 
   void resetPdf() {
+    _invalidatePdf();
+    notifyListeners();
+  }
+
+  /// Any change to the photo set or crops invalidates a pre-built print PDF, so
+  /// checkout can never upload a STALE one (the old photos). Called from
+  /// addPhotos / remove / setCrop.
+  void _invalidatePdf() {
     _pdfBytes = null;
     _pdfProgress = 0.0;
     _pdfStage = '';
-    notifyListeners();
   }
 
   // Customer's delivery info captured on /address before /checkout.
@@ -103,6 +110,7 @@ class Cart extends ChangeNotifier {
   /// Mark a photo's crop as user-edited (vs auto letterbox).
   void setCrop(String id, CropEdit edit) {
     _edits[id] = edit;
+    _invalidatePdf();
     notifyListeners();
   }
 
@@ -158,12 +166,14 @@ class Cart extends ChangeNotifier {
         localPath: localPaths.elementAt(i),
       ));
     }
+    _invalidatePdf();
     notifyListeners();
   }
 
   void remove(String id) {
     _items.removeWhere((item) => item.id == id);
     _edits.remove(id);
+    _invalidatePdf();
     notifyListeners();
   }
 
