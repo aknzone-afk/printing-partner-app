@@ -1,9 +1,11 @@
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import 'models/cart.dart';
+import 'services/firebase/auth_service.dart';
 import 'services/firebase/firebase_options.dart';
 import 'models/orders_store.dart';
 import 'models/print_packages.dart';
@@ -12,11 +14,10 @@ import 'screens/cart_screen.dart';
 import 'screens/checkout_screen.dart';
 import 'screens/crop_screen.dart';
 import 'screens/home_screen.dart';
-import 'screens/login_screen.dart';
 import 'screens/merchant_cloud_screen.dart';
 import 'screens/merchant_screen.dart';
+import 'screens/order_chat_screen.dart';
 import 'screens/order_placed_screen.dart';
-import 'screens/otp_screen.dart';
 import 'screens/packages_screen.dart';
 import 'screens/photo_picker_screen.dart';
 import 'screens/upload_screen.dart';
@@ -24,9 +25,24 @@ import 'theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
-  );
+  // Never white-screen on a slow / offline launch: if Firebase can't start we
+  // still run the app, and order placement retries sign-in with a friendly
+  // error. (Before, an uncaught init failure here killed the whole app.)
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    // App Check authorises Firebase AI Logic (Gemini screenshot-verify + order
+    // chatbot) and protects it from abuse. iOS uses Apple's App Attest.
+    await FirebaseAppCheck.instance.activate(
+      appleProvider: AppleProvider.appAttest,
+    );
+    // No OTP — a silent anonymous sign-in gives the customer a uid for the
+    // Firestore order (real identity = the mobile typed at checkout).
+    await AuthService.instance.ensureSignedIn();
+  } catch (e, st) {
+    debugPrint('[main] Firebase init / sign-in failed: $e\n$st');
+  }
   runApp(const PrintingPartnerApp());
 }
 
@@ -34,15 +50,6 @@ final GoRouter _router = GoRouter(
   initialLocation: '/home',
   routes: [
     GoRoute(path: '/', redirect: (_, __) => '/home'),
-    GoRoute(
-        path: '/login',
-        builder: (_, state) =>
-            LoginScreen(redirectTo: state.extra as String?)),
-    GoRoute(
-      path: '/otp',
-      redirect: (_, state) => state.extra is OtpArgs ? null : '/login',
-      builder: (_, state) => OtpScreen(args: state.extra as OtpArgs),
-    ),
     GoRoute(
       path: '/home',
       builder: (_, state) => HomeScreen(
@@ -78,6 +85,10 @@ final GoRouter _router = GoRouter(
         builder: (_, state) => OrderPlacedScreen(
               orderId: state.extra as String?,
             )),
+    GoRoute(
+        path: '/order-chat',
+        builder: (_, state) =>
+            OrderChatScreen(orderId: state.extra as String? ?? '')),
     GoRoute(path: '/merchant', builder: (_, __) => const MerchantScreen()),
     GoRoute(
         path: '/merchant/cloud',

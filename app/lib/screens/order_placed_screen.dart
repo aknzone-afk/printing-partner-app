@@ -79,6 +79,15 @@ class OrderPlacedScreen extends StatelessWidget {
                 icon: Icons.receipt_long_rounded,
                 onPressed: () => context.go('/home?tab=orders'),
               ),
+              if (orderId != null) ...[
+                const SizedBox(height: 10),
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      context.push('/order-chat', extra: orderId),
+                  icon: const Icon(Icons.chat_bubble_outline_rounded, size: 18),
+                  label: const Text('Chat about your order'),
+                ),
+              ],
               const SizedBox(height: 10),
               TextButton(
                 onPressed: () => context.go('/home'),

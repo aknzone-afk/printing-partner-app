@@ -58,6 +58,10 @@ class OrderRepository {
       String pincode
     }) address,
     required int photoCount,
+    /// UPI payment confirmed by the in-app Gemini screenshot check, or null.
+    /// Written as an ADDITIVE field so the rules-validated `payment` map is
+    /// left exactly as the security rules expect.
+    Map<String, dynamic>? upiProof,
   }) async {
     final cat = await _findCatalogPack(pack);
     final d = cat.data;
@@ -120,6 +124,11 @@ class OrderRepository {
           'status': 'pending',
           'sheetsUploaded': 0,
         },
+        // Additive (not inside the rules-validated `payment` map): the UPI
+        // payment the customer made + Gemini's read of their screenshot. The
+        // shop reconciles the UTR against the bank; `payment.status` is left
+        // for the backend phase to flip.
+        if (upiProof != null) 'upiProof': {...upiProof, 'at': Timestamp.now()},
         'placedAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });

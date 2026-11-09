@@ -19,6 +19,16 @@ class AuthService {
   bool get isLoggedIn => _auth.currentUser != null;
   Stream<User?> get authStateChanges => _auth.authStateChanges();
 
+  /// No OTP (owner 9-Nov-2026, same model as B.B Synthetics): every customer
+  /// gets a silent ANONYMOUS uid so Firestore order writes pass the security
+  /// rules. The real identity is the mobile number typed on the address form.
+  /// Safe to call repeatedly — it signs in only when there is no user yet.
+  Future<String?> ensureSignedIn() async {
+    if (_auth.currentUser != null) return _auth.currentUser!.uid;
+    final cred = await _auth.signInAnonymously();
+    return cred.user?.uid;
+  }
+
   /// Starts phone verification for [phoneE164] (e.g. '+919876543210').
   ///
   /// [onCodeSent] fires when the SMS is out — navigate to the OTP screen with
