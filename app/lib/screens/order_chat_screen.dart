@@ -113,7 +113,7 @@ $facts
       if (addr.isNotEmpty)
         'Shipping to: ${s(addr['city'])}, ${s(addr['state'])} ${s(addr['pincode'])}',
       'Typical delivery: 3–5 days across India after dispatch.',
-      'Meaning of statuses: received = order placed; getting_ready/processing = being printed; dispatched/shipped = on the way; delivered = arrived.',
+      'Meaning of statuses: received = order placed and paid; printing = your photos are being printed; shipped = on the way to you; delivered = arrived. These are the ONLY statuses — never mention any other.',
     ];
     return lines.join('\n');
   }

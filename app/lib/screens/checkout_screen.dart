@@ -33,23 +33,52 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _stage = '';
   String? _error;
 
+  /// The authoritative price (paise) read from the catalog — the amount the
+  /// order will actually book. Used for the QR + the screenshot amount-check so
+  /// the customer never pays a value the order would then be rejected for.
+  int? _authoritativePaise;
+
+  /// Set once the order exists in Firestore, so a retry after a failed sheet
+  /// upload RESUMES the upload instead of minting a SECOND order (honours the
+  /// "never create duplicate orders" rule).
+  String? _placedOrderId;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPrice());
+  }
+
+  Future<void> _loadPrice() async {
+    final pack = context.read<Cart>().selectedPack;
+    if (pack == null) return;
+    try {
+      final paise = await OrderRepository.instance.catalogPriceInPaise(pack);
+      if (mounted) setState(() => _authoritativePaise = paise);
+    } catch (_) {
+      // Offline / catalog unreachable: fall back to the cart price for display;
+      // createOrder re-checks the catalog and surfaces a real error if needed.
+      if (mounted) {
+        setState(() => _authoritativePaise = context.read<Cart>().totalPaise);
+      }
+    }
+  }
+
   void _setStage(String s) {
     if (mounted) setState(() => _stage = s);
   }
 
   Future<void> _attachAndVerify() async {
-    final cart = context.read<Cart>();
-    final rupees = cart.totalPaise / 100.0;
+    if (_busy) return; // re-entrancy guard (double-tap / fast re-tap)
+    final rupees = (_authoritativePaise ?? context.read<Cart>().totalPaise) / 100.0;
 
     // 1. Pick the payment screenshot.
     final XFile? picked;
     try {
-      picked = await ImagePicker().pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 90,
-      );
+      picked = await ImagePicker()
+          .pickImage(source: ImageSource.gallery, imageQuality: 90);
     } catch (e) {
-      _showError('Could not open your gallery: $e');
+      _showSnack('Could not open your gallery: $e');
       return;
     }
     if (picked == null) return; // cancelled
@@ -62,7 +91,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     try {
       // 2. Compress to JPEG for Gemini.
-      Uint8List bytes;
       final jpg = await FlutterImageCompress.compressWithFile(
         picked.path,
         minWidth: 1400,
@@ -70,9 +98,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         quality: 85,
         format: CompressFormat.jpeg,
       );
-      bytes = jpg ?? await picked.readAsBytes();
+      final Uint8List bytes = jpg ?? await picked.readAsBytes();
 
-      // 3. Verify with Gemini (amount + soft payee match).
+      // 3. Verify with Gemini (amount + soft payee match + UTR capture).
       final hasPayee = UpiQr.merchantUpiId.isNotEmpty;
       final check = await PaymentVerifier.instance.verify(
         screenshotJpg: bytes,
@@ -100,11 +128,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       });
     } catch (e) {
       debugPrint('[Checkout] verify/place failed: $e');
-      setState(() {
-        _busy = false;
-        _stage = '';
-        _error = 'Something went wrong: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _stage = '';
+          _error = _placedOrderId == null
+              ? 'Something went wrong: $e'
+              : 'Your payment was accepted and the order is placed — we\'re still '
+                  'finishing the print sheets. Tap again to retry just that step.';
+        });
+      }
     }
   }
 
@@ -112,38 +145,54 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final cart = context.read<Cart>();
     final orders = context.read<OrdersStore>();
     final pack = cart.selectedPack;
-    if (pack == null) return;
-
-    final cachedBytes = cart.pdfBytes; // built at /upload
-
-    _setStage('Placing order…');
-    final uid = await AuthService.instance.ensureSignedIn();
-    if (uid == null) {
+    if (pack == null) {
       setState(() {
         _busy = false;
         _stage = '';
-        _error = 'Could not reach the server. Check your internet and retry.';
       });
       return;
     }
 
-    final created = await OrderRepository.instance.createOrder(
-      uid: uid,
-      pack: pack,
-      customerName: cart.customerName.isEmpty ? 'Customer' : cart.customerName,
-      customerPhone: '+91${cart.customerPhone}',
-      address: (
-        line1: cart.addressLine1,
-        line2: cart.addressLine2,
-        city: cart.city,
-        state: cart.state,
-        pincode: cart.pincode,
-      ),
-      photoCount: cart.itemCount,
-      upiProof: upiProof,
-    );
+    final cachedBytes = cart.pdfBytes; // built at /upload
 
-    // Turn the print PDF into per-sheet 300-DPI JPGs and upload them.
+    // 1. Create the order ONCE. A retry after a failed sheet upload reuses the
+    //    already-created order so a second order/number is never minted.
+    String orderId;
+    if (_placedOrderId != null) {
+      orderId = _placedOrderId!;
+    } else {
+      _setStage('Placing order…');
+      final uid = await AuthService.instance.ensureSignedIn();
+      if (uid == null) {
+        setState(() {
+          _busy = false;
+          _stage = '';
+          _error = 'Could not reach the server. Check your internet and retry.';
+        });
+        return;
+      }
+      final created = await OrderRepository.instance.createOrder(
+        uid: uid,
+        pack: pack,
+        customerName:
+            cart.customerName.isEmpty ? 'Customer' : cart.customerName,
+        customerPhone: '+91${cart.customerPhone}',
+        address: (
+          line1: cart.addressLine1,
+          line2: cart.addressLine2,
+          city: cart.city,
+          state: cart.state,
+          pincode: cart.pincode,
+        ),
+        photoCount: cart.itemCount,
+        upiProof: upiProof,
+      );
+      orderId = created.orderId;
+      _placedOrderId = orderId; // survive a later sheet-upload failure
+    }
+
+    // 2. Rasterise + upload the print sheets (per-chunk set() is idempotent,
+    //    so a resume re-sends the same chunks safely).
     if (cachedBytes != null) {
       _setStage('Preparing print sheets…');
       final jpgs = await SheetPdfService.rasterizeToJpgs(
@@ -152,10 +201,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
       var lastPct = -1;
       await OrderRepository.instance.uploadSheets(
-        orderId: created.orderId,
+        orderId: orderId,
         sheetJpgs: jpgs,
         onProgress: (done, total) {
-          final pct = (done * 100 ~/ total);
+          final pct = total > 0 ? (done * 100 ~/ total) : 100;
           if (pct != lastPct) {
             lastPct = pct;
             _setStage('Uploading sheets…  $pct%');
@@ -164,8 +213,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
     }
 
+    // 3. Keep the local record + go to the confirmation.
     final order = OrderRecord(
-      id: created.orderId,
+      id: orderId,
       placedAt: DateTime.now(),
       customerName: cart.customerName.isEmpty ? 'Customer' : cart.customerName,
       customerPhone: cart.customerPhone.isEmpty ? '—' : '+91 ${cart.customerPhone}',
@@ -175,7 +225,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       sizeDimensions: pack.size.dimensions,
       snapCount: pack.snapCount,
       sheetsNeeded: pack.sheetsNeeded,
-      totalPaise: cart.totalPaise,
+      totalPaise: _authoritativePaise ?? cart.totalPaise,
       photoPaths: cart.items.map((i) => i.localPath).toList(),
       status: OrderStatus.received,
       pdfStatus:
@@ -189,7 +239,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     if (!mounted) return;
     cart.clear();
-    context.go('/order-placed', extra: created.orderId);
+    context.go('/order-placed', extra: orderId);
   }
 
   static Future<void> _buildSheetsForOrder(
@@ -203,7 +253,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
   }
 
-  void _showError(String msg) {
+  void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
@@ -211,8 +261,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   Widget build(BuildContext context) {
     final cart = context.watch<Cart>();
-    final rupees = cart.totalPaise / 100.0;
-    final amountLabel = cart.paiseToRupees(cart.totalPaise);
+    final paise = _authoritativePaise ?? cart.totalPaise;
+    final rupees = paise / 100.0;
+    final amountLabel = cart.paiseToRupees(paise);
+    final priceLoading = _authoritativePaise == null;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Pay & place order')),
@@ -220,7 +272,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            // Amount
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16),
@@ -238,11 +289,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
             const SizedBox(height: 20),
-
             if (!UpiQr.configured)
               _SetupPending()
             else ...[
-              // QR to scan
               Center(
                 child: Column(
                   children: [
@@ -259,8 +308,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
-                        border:
-                            Border.all(color: AppColors.textSecondary.withValues(alpha: 0.2)),
+                        border: Border.all(
+                            color: AppColors.textSecondary
+                                .withValues(alpha: 0.2)),
                       ),
                       child: QrImageView(
                         data: UpiQr.withAmount(rupees),
@@ -279,7 +329,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               const SizedBox(height: 24),
               _Steps(amountLabel: amountLabel),
               const SizedBox(height: 24),
-
               if (_busy && _stage.isNotEmpty) ...[
                 const Center(child: CircularProgressIndicator()),
                 const SizedBox(height: 10),
@@ -292,9 +341,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ),
               ] else ...[
                 PrimaryButton(
-                  label: 'I\'ve paid — attach screenshot',
+                  label: priceLoading
+                      ? 'Loading…'
+                      : 'I\'ve paid — attach screenshot',
                   icon: Icons.verified_rounded,
-                  onPressed: _attachAndVerify,
+                  onPressed: priceLoading ? null : _attachAndVerify,
                 ),
                 if (_error != null) ...[
                   const SizedBox(height: 12),
@@ -324,8 +375,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               const Center(
                 child: Text(
                   '🔒 We read your screenshot only to confirm the amount.',
-                  style: TextStyle(
-                      fontSize: 11, color: AppColors.textSecondary),
+                  style:
+                      TextStyle(fontSize: 11, color: AppColors.textSecondary),
                 ),
               ),
             ],
@@ -365,9 +416,11 @@ class _Steps extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        row('1', 'Scan the QR above with GPay / PhonePe / Paytm and pay $amountLabel.'),
+        row('1',
+            'Scan the QR above with GPay / PhonePe / Paytm and pay $amountLabel.'),
         row('2', 'Take a screenshot of the "payment successful" screen.'),
-        row('3', 'Tap below and attach that screenshot — we confirm it instantly.'),
+        row('3',
+            'Tap below and attach that screenshot — we confirm it instantly.'),
       ],
     );
   }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -35,8 +36,13 @@ class SheetPdfService {
     onProgress?.call(0.02, 'Preparing photos…');
 
     final perSheet = size.perSheet;
-    final totalSheets = order.sheetsNeeded;
     final n = order.photoPaths.length;
+    // Paginate by the ACTUAL photo count, not the catalog snapCount. The cart
+    // allows photos >= snapCount, so using snapCount would silently DROP the
+    // extras (customer paid, never printed); and if photos < snapCount,
+    // sublist(start,…) could run past the list and throw. buildBytesForGroup
+    // already paginates this way.
+    final totalSheets = perSheet > 0 ? (n / perSheet).ceil() : 1;
 
     // ONE photo at a time, straight from disk through the native codec.
     // The previous two-phase design (fetch ALL raw bytes, then compress ALL)
@@ -148,24 +154,25 @@ class SheetPdfService {
     for (final b in bytesList) {
       if (b == null) {
         out.add(null);
-      } else {
-        try {
-          final decoded = img.decodeImage(b);
-          if (decoded == null) {
-            out.add(b);
-          } else {
-            final rotated = img.copyRotate(decoded, angle: -90);
-            out.add(Uint8List.fromList(
-                img.encodeJpg(rotated, quality: _printJpegQuality)));
-          }
-        } catch (e) {
-          debugPrint('[SheetPdf] rotate failed: $e — keeping unrotated');
-          out.add(b);
-        }
+        continue;
       }
-      // Yield between photos so the UI stays responsive — rotation is
-      // pure-Dart and would otherwise block the isolate.
-      await Future<void>.delayed(Duration.zero);
+      try {
+        // Decode/rotate/encode of a ~3000 px photo is pure-Dart and heavy, so
+        // run it on a BACKGROUND ISOLATE (like the sibling flattenResizeEncode)
+        // — doing it on the UI isolate janked / risked an ANR for landscape
+        // polaroid orders with many photos.
+        final rotated = await Isolate.run<Uint8List?>(() {
+          final decoded = img.decodeImage(b);
+          if (decoded == null) return null;
+          final r = img.copyRotate(decoded, angle: -90);
+          return Uint8List.fromList(
+              img.encodeJpg(r, quality: _printJpegQuality));
+        });
+        out.add(rotated ?? b); // undecodable → keep the original
+      } catch (e) {
+        debugPrint('[SheetPdf] rotate failed: $e — keeping unrotated');
+        out.add(b);
+      }
     }
     return out;
   }
@@ -270,7 +277,7 @@ class SheetPdfService {
 
     onProgress?.call(0.92, 'Building combined sheets…');
     final perSheet = size.perSheet;
-    final totalSheets = (n / perSheet).ceil();
+    final totalSheets = perSheet > 0 ? (n / perSheet).ceil() : 1;
     final pdf = pw.Document();
     for (var s = 0; s < totalSheets; s++) {
       final start = s * perSheet;

@@ -105,9 +105,13 @@ class OrdersStore extends ChangeNotifier {
       final raw = prefs.getString(_storageKey);
       if (raw != null && raw.isNotEmpty) {
         final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-        _orders
-          ..clear()
-          ..addAll(list.map(OrderRecord.fromJson));
+        // MERGE by id (don't clear+addAll): an order placed via place() during
+        // this async startup gap must not be wiped by the restore. Restored
+        // records fill in only ids not already present.
+        final have = _orders.map((o) => o.id).toSet();
+        for (final rec in list.map(OrderRecord.fromJson)) {
+          if (!have.contains(rec.id)) _orders.insert(0, rec);
+        }
         debugPrint('[OrdersStore] restored ${_orders.length} orders');
         // For each restored order, try to hydrate its PDF from IndexedDB.
         // If found → flip status to ready and attach bytes.

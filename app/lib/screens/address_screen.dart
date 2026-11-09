@@ -232,20 +232,20 @@ class _AddressScreenState extends State<AddressScreen> {
               // succeeded), unlock when the lookup failed so the user has a
               // way forward.
               Builder(builder: (_) {
-                final manualMode = _pincodeError != null && !_pincodeLoading;
+                // City/State stay EDITABLE after a successful lookup so a wrong
+                // auto-filled district can be corrected; locked only while the
+                // lookup is in flight.
                 final hint = _pincodeLoading
                     ? 'Looking up…'
-                    : (manualMode
-                        ? 'Type manually'
-                        : 'Auto-filled from pincode');
+                    : 'Auto-filled — edit if needed';
                 return Row(
                   children: [
                     Expanded(
                       child: _Field(
                         controller: _city,
                         label: 'City',
-                        readOnly: !manualMode,
-                        enabled: manualMode,
+                        readOnly: _pincodeLoading,
+                        enabled: !_pincodeLoading,
                         textCapitalization: TextCapitalization.words,
                         hintText: hint,
                         validator: (v) => (v == null || v.trim().isEmpty)
@@ -258,8 +258,8 @@ class _AddressScreenState extends State<AddressScreen> {
                       child: _Field(
                         controller: _state,
                         label: 'State',
-                        readOnly: !manualMode,
-                        enabled: manualMode,
+                        readOnly: _pincodeLoading,
+                        enabled: !_pincodeLoading,
                         textCapitalization: TextCapitalization.words,
                         hintText: hint,
                         validator: (v) => (v == null || v.trim().isEmpty)

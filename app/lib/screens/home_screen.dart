@@ -30,9 +30,6 @@ class _HomeScreenState extends State<HomeScreen> {
     'profile' => 2,
     _ => 0,
   };
-  // TODO(week2): replace with FirebaseAuth state
-  final bool _isLoggedIn = false;
-
   static const _titles = ['PRINTING PARTNER', 'MY ORDERS', 'PROFILE'];
 
   @override
@@ -56,7 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const _HomeTab(),
           const _OrdersTab(),
-          _ProfileTab(isLoggedIn: _isLoggedIn),
+          const _ProfileTab(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -133,100 +130,6 @@ class _HomeTab extends StatelessWidget {
             ],
             const SizedBox(height: 16),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PromoBanner extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [AppColors.primary, AppColors.primaryDark],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Text(
-                  '20 prints @ ₹15 each',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                SizedBox(height: 4),
-                Text(
-                  'Free shipping above ₹299',
-                  style: TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-          const Icon(Icons.local_offer_outlined,
-              color: Colors.white70, size: 36),
-        ],
-      ),
-    );
-  }
-}
-
-class _Step extends StatelessWidget {
-  const _Step(
-      {required this.icon, required this.title, required this.desc});
-
-  final IconData icon;
-  final String title;
-  final String desc;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Row(
-            children: [
-              Container(
-                height: 44,
-                width: 44,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon, color: AppColors.primary),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title,
-                        style: const TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 2),
-                    Text(desc,
-                        style: const TextStyle(
-                            fontSize: 13,
-                            color: AppColors.textSecondary)),
-                  ],
-                ),
-              ),
-            ],
-          ),
         ),
       ),
     );
@@ -468,77 +371,55 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
 }
 
 class _ProfileTab extends StatelessWidget {
-  const _ProfileTab({required this.isLoggedIn});
-  final bool isLoggedIn;
+  const _ProfileTab();
 
   @override
   Widget build(BuildContext context) {
+    final orders = context.watch<OrdersStore>();
     return SafeArea(
       child: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          if (!isLoggedIn) ...[
-            Card(
-              color: AppColors.primary.withValues(alpha: 0.06),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'You\'re browsing as guest',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w700),
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Sign in to track orders, save addresses, and re-order in one tap.',
-                      style: TextStyle(
-                          fontSize: 13, color: AppColors.textSecondary),
-                    ),
-                    const SizedBox(height: 16),
-                    PrimaryButton(
-                      label: 'Sign in / Sign up',
-                      icon: Icons.login_rounded,
-                      onPressed: () => context.push('/login'),
-                    ),
-                  ],
-                ),
+          Card(
+            color: AppColors.primary.withValues(alpha: 0.06),
+            child: const Padding(
+              padding: EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.verified_user_outlined,
+                          color: AppColors.primary),
+                      SizedBox(width: 10),
+                      Text('No login needed',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w700)),
+                    ],
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Your orders are saved on this phone — just order and pay by UPI. '
+                    'We identify you by the mobile number you enter at checkout.',
+                    style: TextStyle(
+                        fontSize: 13, color: AppColors.textSecondary),
+                  ),
+                ],
               ),
             ),
-          ] else ...[
-            const CircleAvatar(
-              radius: 36,
-              backgroundColor: AppColors.primary,
-              child: Icon(Icons.person, color: Colors.white, size: 40),
-            ),
-            const SizedBox(height: 12),
-            const Center(
-              child: Text(
-                '+91 98765 43210',
-                style:
-                    TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-              ),
-            ),
-          ],
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            leading: const Icon(Icons.receipt_long_outlined,
+                color: AppColors.textSecondary),
+            title: Text(
+                '${orders.count} order${orders.count == 1 ? '' : 's'} on this phone'),
+            trailing: const Icon(Icons.chevron_right,
+                color: AppColors.textSecondary),
+            onTap: () => context.go('/home?tab=orders'),
+          ),
         ],
       ),
-    );
-  }
-}
-
-class _ProfileTile extends StatelessWidget {
-  const _ProfileTile({required this.icon, required this.title});
-  final IconData icon;
-  final String title;
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      leading: Icon(icon, color: AppColors.textSecondary),
-      title: Text(title),
-      trailing:
-          const Icon(Icons.chevron_right, color: AppColors.textSecondary),
-      onTap: () {},
     );
   }
 }

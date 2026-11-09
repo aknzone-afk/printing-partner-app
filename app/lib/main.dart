@@ -33,9 +33,14 @@ Future<void> main() async {
       options: DefaultFirebaseOptions.currentPlatform,
     );
     // App Check authorises Firebase AI Logic (Gemini screenshot-verify + order
-    // chatbot) and protects it from abuse. iOS uses Apple's App Attest.
+    // chatbot) and protects it from abuse. Release/TestFlight uses Apple's App
+    // Attest; debug/simulator uses the debug provider (App Attest can't issue a
+    // token on the simulator, which would block Firestore + Gemini in dev).
+    // NOTE: keep App Check UNENFORCED (monitor mode) on Firestore + AI Logic in
+    // the console until the installed base can attest, or ordering breaks.
     await FirebaseAppCheck.instance.activate(
-      appleProvider: AppleProvider.appAttest,
+      appleProvider:
+          kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
     );
     // No OTP — a silent anonymous sign-in gives the customer a uid for the
     // Firestore order (real identity = the mobile typed at checkout).

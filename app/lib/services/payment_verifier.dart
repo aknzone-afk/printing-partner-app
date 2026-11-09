@@ -110,6 +110,17 @@ Rules:
           payee: nn(payee),
         );
       }
+      // Require the UTR / UPI transaction id: it is how the shop reconciles the
+      // payment against the bank and stops the same screenshot being reused.
+      if (utr.isEmpty) {
+        return PaymentCheck(
+          verified: false,
+          reason:
+              'We couldn\'t read the transaction ID (UTR) on this screenshot. Please attach the full "payment successful" screen that shows the UPI transaction ID / UTR.',
+          amountRead: amount,
+          payee: nn(payee),
+        );
+      }
       return PaymentCheck(
         verified: true,
         reason: 'Payment of ₹${amount.toStringAsFixed(0)} confirmed. ✅',

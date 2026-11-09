@@ -73,10 +73,13 @@ class _CropScreenState extends State<CropScreen> {
     _advance();
   }
 
-  /// Mark every remaining photo as skipped (white-pad) and jump to cart.
+  /// Mark EVERY photo as skipped (white-pad) and jump to cart. Covers all
+  /// photos (not just from the current index) so the cart never bounces back
+  /// to "Review crops" because an earlier photo the user jumped past is still
+  /// unreviewed.
   void _skipAll() {
     final cart = context.read<Cart>();
-    for (var i = _index; i < cart.items.length; i++) {
+    for (var i = 0; i < cart.items.length; i++) {
       final item = cart.items[i];
       cart.setCrop(
           item.id, CropEdit.skipped(rotationSteps: _rotFor(item.id)));
@@ -84,10 +87,11 @@ class _CropScreenState extends State<CropScreen> {
     context.go('/cart');
   }
 
-  /// Auto-crop every remaining photo: center, fill the frame, no white space.
+  /// Auto-crop EVERY photo: center, fill the frame, no white space. Covers all
+  /// photos (not just from the current index) so none is left unreviewed.
   void _autoCropAll() {
     final cart = context.read<Cart>();
-    for (var i = _index; i < cart.items.length; i++) {
+    for (var i = 0; i < cart.items.length; i++) {
       final item = cart.items[i];
       cart.setCrop(
         item.id,

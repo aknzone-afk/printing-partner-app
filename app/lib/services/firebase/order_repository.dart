@@ -43,6 +43,16 @@ class OrderRepository {
     return (packId: q.docs.first.id, data: q.docs.first.data());
   }
 
+  /// The authoritative price (in paise) the security rules will book for
+  /// [pack], read from the catalog doc. Checkout uses THIS as the single
+  /// source of truth for the UPI QR amount and the screenshot amount-check, so
+  /// the customer can never pay an amount the order would then be rejected for
+  /// (client print_packages price vs seeded catalog price could drift).
+  Future<int> catalogPriceInPaise(PrintPack pack) async {
+    final cat = await _findCatalogPack(pack);
+    return (cat.data['priceInPaise'] as num).toInt();
+  }
+
   /// Creates the Firestore order (minting the next global order number) and
   /// returns its id + number. Throws on rules rejection / network failure.
   Future<({String orderId, String orderNumber, int totalPaise})> createOrder({
