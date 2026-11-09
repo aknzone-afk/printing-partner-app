@@ -12,8 +12,13 @@ Endpoints
                                customer can never fake "payment received".
   POST /ingest                 cropped photos + order meta + the payment token ->
                                filed to the VM disk tree (filer.py). Rejects a
-                               missing/forged token and a REUSED UTR (one payment,
-                               one order).
+                               missing/forged token (402 payment_required), a stale
+                               one (402 token_expired -> app re-verifies), a paid
+                               amount that does not match the pack's catalog price
+                               (402 amount_mismatch), more photos than the pack
+                               (400) and a REUSED UTR (409, one payment, one order).
+                               A retry of the SAME order after a lost response
+                               answers 200 {duplicate:true} instead of 409.
   POST /chat                   order facts + question -> Gemini order assistant.
   GET  /  /dashboard           merchant browse + per-order ZIP download (password).
 
@@ -101,6 +106,21 @@ def min_price_for(category: str, size: str, n_photos: int):
            [max(cands, key=lambda p: int(p["count"]))]
     return float(min(p["rupees"] for p in fits))
 
+
+def price_for(category: str, size: str, snap_count: int):
+    """Exact catalog price (rupees) of the pack (category, size, snapCount);
+    None when no such pack exists. This server table is authoritative — the
+    snapCount the app sends is only a hint of WHICH pack it claims to be."""
+    cat = _CAT_ALIASES.get(_norm(category), None)
+    sz = _norm(size)
+    if cat is None or not sz or snap_count <= 0:
+        return None
+    for p in _CATALOG:
+        if p["category"] == cat and int(p["count"]) == int(snap_count) and \
+                (_norm(p["size"]) == sz or _norm(p["dimensions"]) == sz):
+            return float(p["rupees"])
+    return None
+
 # ---------------------------------------------------------------- Gemini (lazy)
 _model = None
 
@@ -146,6 +166,25 @@ def _utr_seen(utr: str) -> bool:
     return False
 
 
+def _ledger_find(utr: str):
+    """The ledger row that already consumed this UTR, or None."""
+    if not utr:
+        return None
+    path = _ledger_path()
+    if not os.path.exists(path):
+        return None
+    key = utr.strip().lower()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+                if str(rec.get("utr", "")).strip().lower() == key:
+                    return rec
+            except Exception:
+                continue
+    return None
+
+
 def _ledger_append(rec: dict) -> None:
     with open(_ledger_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -160,15 +199,18 @@ def _make_token(amount: float, utr: str) -> str:
     return f"{body}.{sig}"
 
 
-def _check_token(token: str):
-    """Return the payload dict if the token is authentic and fresh, else None."""
+def _check_token(token: str, allow_expired: bool = False):
+    """Return the payload dict if the token is authentic and fresh, else None.
+    With allow_expired=True an authentic-but-stale token is still returned, so
+    /ingest can tell "token expired" (re-verify the same screenshot) apart from
+    "forged / missing" (payment never verified)."""
     try:
         body, sig = token.split(".", 1)
         want = hmac.new(PAYMENT_SECRET, body.encode(), hashlib.sha256).hexdigest()[:32]
         if not hmac.compare_digest(sig, want):
             return None
         payload = json.loads(base64.urlsafe_b64decode(body.encode()))
-        if int(time.time()) - int(payload["ts"]) > TOKEN_TTL:
+        if not allow_expired and int(time.time()) - int(payload["ts"]) > TOKEN_TTL:
             return None
         return payload
     except Exception:
@@ -274,21 +316,41 @@ def verify_payment():
 def ingest():
     """Files one order's INDIVIDUAL cropped photos to the VM disk tree.
     Requires the HMAC payment token from /verify-payment and a fresh UTR."""
+    _need_api_token()
     enforce = os.environ.get("PAYMENT_ENFORCE", "1") != "0"
     meta_raw = request.form.get("order", "{}")
     try:
         meta = json.loads(meta_raw)
+        if not isinstance(meta, dict):
+            raise ValueError("order must be an object")
     except Exception:
         return jsonify(ok=False, error="bad order json"), 400
+    order_number = str(meta.get("orderNumber") or "")
 
     token = request.form.get("token", "")
     payload = _check_token(token) if token else None
     if enforce and not payload:
+        # Authentic but stale -> the app re-verifies the SAME screenshot for the
+        # SAME order (the UTR is not in the ledger yet). Forged/missing -> no
+        # payment was ever verified.
+        if token and _check_token(token, allow_expired=True):
+            return jsonify(ok=False, error="token_expired",
+                           reason="Your upload pass expired. Please re-attach "
+                                  "the payment screenshot."), 402
         return jsonify(ok=False, error="payment_required",
                        reason="Payment not verified."), 402
     utr = (payload or {}).get("utr", "")
-    if enforce and utr and _utr_seen(utr):
-        return jsonify(ok=False, error="utr_reused"), 409
+    if enforce and utr:
+        prev = _ledger_find(utr)
+        if prev is not None:
+            # Idempotent retry: the client timed out / lost the response after
+            # we had already filed THIS order. Never a second filing, never a
+            # false "used for another order" rejection.
+            if order_number and str(prev.get("orderNumber") or "") == order_number:
+                return jsonify(ok=True, filed=int(prev.get("photos") or 0),
+                               duplicate=True, orderNumber=order_number)
+            return jsonify(ok=False, error="utr_reused",
+                           orderNumber=str(prev.get("orderNumber") or "")), 409
 
     files = request.files.getlist("photos")
     if not files:
@@ -296,17 +358,36 @@ def ingest():
     if len(files) > MAX_PHOTOS:
         return jsonify(ok=False, error="too many photos"), 413
 
-    # Price floor: the paid amount (inside the signed token) must cover the
-    # pack this order needs. Unknown size -> at least the cheapest pack.
+    # The pack this order claims to be. snapCount is required so the server can
+    # tie the PAID amount to the exact (category, size, snapCount) price.
+    try:
+        snap_count = int(meta.get("snapCount") or 0)
+    except (TypeError, ValueError):
+        snap_count = 0
+    if snap_count > 0 and len(files) > snap_count:
+        return jsonify(ok=False, error="too_many_photos",
+                       reason=f"This pack holds {snap_count} photos; "
+                              f"{len(files)} were sent."), 400
+
+    # Price tie: the paid amount (inside the signed token) must match the pack
+    # being filed. The server table (catalog.json) is authoritative; the app's
+    # amountRupees is ignored. Legacy clients without snapCount fall back to
+    # the cheapest pack that holds the photos uploaded.
     if enforce and payload:
         paid = float(payload.get("amount") or 0)
-        need = min_price_for(str(meta.get("category") or ""),
-                             str(meta.get("size") or ""), len(files))
+        category = str(meta.get("category") or "")
+        size = str(meta.get("size") or "")
+        exact = price_for(category, size, snap_count) if snap_count > 0 else None
+        if snap_count > 0 and exact is None:
+            app.logger.warning("ingest unknown pack %s/%s x%d", category, size, snap_count)
+            return jsonify(ok=False, error="unknown_pack",
+                           reason="This print pack is not in the catalog."), 400
+        need = exact if exact is not None else min_price_for(category, size, len(files))
         floor = need if need is not None else GLOBAL_MIN_RUPEES
         if paid + AMOUNT_TOLERANCE < floor:
-            app.logger.warning("ingest underpaid: paid %.2f < floor %.2f (%s/%s x%d)",
-                               paid, floor, meta.get("category"), meta.get("size"), len(files))
-            return jsonify(ok=False, error="underpaid",
+            app.logger.warning("ingest amount mismatch: paid %.2f < price %.2f (%s/%s x%d, %d photos)",
+                               paid, floor, category, size, snap_count, len(files))
+            return jsonify(ok=False, error="amount_mismatch",
                            reason=f"Paid ₹{paid:.0f} but this pack costs "
                                   f"₹{floor:.0f}. Please pay the full amount."), 402
     photos: list[bytes] = []
@@ -329,7 +410,7 @@ def ingest():
             when=when,
             category=str(meta.get("category") or "Other"),
             size=str(meta.get("size") or "Unknown"),
-            order_number=str(meta.get("orderNumber") or int(time.time())),
+            order_number=order_number or str(int(time.time())),
             photos=photos,
         )
     except Exception as e:
@@ -338,7 +419,7 @@ def ingest():
 
     if payload:
         _ledger_append({
-            "orderNumber": str(meta.get("orderNumber") or ""),
+            "orderNumber": order_number,
             "amount": payload.get("amount"),
             "utr": utr,
             "photos": len(written),

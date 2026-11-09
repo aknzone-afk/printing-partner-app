@@ -17,6 +17,7 @@ class CartScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('YOUR CART'),
         leading: IconButton(
+          tooltip: 'Back',
           icon: const Icon(Icons.arrow_back_rounded),
           onPressed: () =>
               context.canPop() ? context.pop() : context.go('/home'),
@@ -94,12 +95,21 @@ class _PackBanner extends StatelessWidget {
               ],
             ),
           ),
-          Text(
-            pack.priceLabel,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 22,
-              fontWeight: FontWeight.w800,
+          const SizedBox(width: 12),
+          // Shrinks (never clips) when large text scaling squeezes the row.
+          Flexible(
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(
+                pack.priceLabel,
+                maxLines: 1,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
             ),
           ),
         ],
@@ -143,15 +153,22 @@ class _PhotoGrid extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Your selection',
-              style: TextStyle(
-                  fontSize: 14, fontWeight: FontWeight.w700),
+            const Flexible(
+              child: Text(
+                'Your selection',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w700),
+              ),
             ),
-            TextButton.icon(
-              onPressed: () => context.push('/photos'),
-              icon: const Icon(Icons.edit_outlined, size: 16),
-              label: const Text('Edit'),
+            Tooltip(
+              message: 'Add or remove photos',
+              child: TextButton.icon(
+                onPressed: () => context.push('/photos'),
+                icon: const Icon(Icons.edit_outlined, size: 16),
+                label: const Text('Edit'),
+              ),
             ),
           ],
         ),
@@ -169,6 +186,7 @@ class _PhotoGrid extends StatelessWidget {
           itemBuilder: (context, index) {
             final item = cart.items[index];
             final edit = cart.cropFor(item.id);
+            final position = 'Photo ${index + 1} of ${cart.items.length}';
             return GestureDetector(
               onTap: () => context.push('/crop?i=$index'),
               child: Stack(
@@ -180,6 +198,7 @@ class _PhotoGrid extends StatelessWidget {
                       color: Colors.white,
                       child: PhotoThumb(
                         path: item.localPath,
+                        semanticLabel: '$position. Tap to edit crop',
                         // Show as it'll print: cover for cropped, contain for skipped
                         fit: (edit != null && edit.skipped)
                             ? BoxFit.contain
@@ -216,19 +235,41 @@ class _PhotoGrid extends StatelessWidget {
                       ),
                     ),
                   ),
+                  // Remove: the visible badge stays 24 dp but the hit area
+                  // is a full 48-dp square anchored to the top-right corner.
                   Positioned(
-                    top: 4,
-                    right: 4,
-                    child: InkWell(
-                      onTap: () => cart.remove(item.id),
-                      child: Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withValues(alpha: 0.55),
-                          shape: BoxShape.circle,
+                    top: 0,
+                    right: 0,
+                    child: Semantics(
+                      button: true,
+                      label: 'Remove $position',
+                      child: Tooltip(
+                        message: 'Remove photo',
+                        child: Material(
+                          color: Colors.transparent,
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: () => cart.remove(item.id),
+                            child: SizedBox(
+                              width: 48,
+                              height: 48,
+                              child: Align(
+                                alignment: const Alignment(0.6, -0.6),
+                                child: Container(
+                                  width: 24,
+                                  height: 24,
+                                  decoration: BoxDecoration(
+                                    color:
+                                        Colors.black.withValues(alpha: 0.55),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(Icons.close,
+                                      size: 14, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                        child: const Icon(Icons.close,
-                            size: 14, color: Colors.white),
                       ),
                     ),
                   ),

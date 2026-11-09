@@ -1,15 +1,18 @@
-import 'dart:convert';
-
-import 'package:firebase_ai/firebase_ai.dart';
 import 'package:flutter/foundation.dart';
 
-/// Result of reading a UPI payment screenshot with Gemini.
+import 'backend_api.dart';
+
+/// Result of a UPI payment-screenshot check. The SERVER decides; this is the
+/// app-side view of its answer.
 class PaymentCheck {
   final bool verified;
   final String reason; // customer-facing message
-  final double? amountRead; // rupees Gemini read from the screenshot
+  final double? amountRead; // rupees the server read from the screenshot
   final String? utr; // UTR / UPI reference / transaction id
   final String? payee; // receiver name or VPA read
+  /// One-shot payment token issued by the server; present ONLY when
+  /// [verified] is true. Pass it to the order ingest call.
+  final String? token;
 
   const PaymentCheck({
     required this.verified,
@@ -17,33 +20,20 @@ class PaymentCheck {
     this.amountRead,
     this.utr,
     this.payee,
+    this.token,
   });
 }
 
-/// Reads an Indian UPI payment screenshot with Gemini (Firebase AI Logic — the
-/// Gemini Developer API, free on the Spark plan, no key shipped in the app) and
-/// checks it paid the expected amount to our account. This is a first-pass
-/// confirmation for the customer; the shop still sees the UTR to reconcile.
+/// Sends the UPI payment screenshot to our backend (`/verify-payment`), which
+/// reads it with Gemini and checks it paid the expected amount to our account.
+/// No AI key ships in the app and the app never decides "paid" on its own.
 class PaymentVerifier {
   PaymentVerifier._();
   static final PaymentVerifier instance = PaymentVerifier._();
 
-  GenerativeModel? _model;
-  GenerativeModel get _m =>
-      _model ??= FirebaseAI.googleAI().generativeModel(model: 'gemini-2.5-flash');
-
-  static const _prompt = '''
-You are verifying an Indian UPI payment screenshot (GPay, PhonePe, Paytm, BHIM or a bank app).
-Return ONLY one compact JSON object, no markdown fences, with exactly these keys:
-{"status":"success|failed|pending|unknown","amount":<number of rupees or null>,"utr":"<UTR / UPI reference / transaction id or empty>","payeeName":"<money receiver's name or empty>","payeeUpiId":"<receiver UPI id / VPA or empty>"}
-Rules:
-- "amount" is a plain number of rupees (e.g. "₹1,499.00" -> 1499).
-- "status" is "success" only if the screen clearly shows the payment completed/paid.
-- If it is not a UPI payment screenshot at all, use "unknown".
-''';
-
-  /// Verify [screenshotJpg] paid [expectedRupees] to [ourUpiId] / [ourName]
-  /// (payee match is soft — many apps hide the receiver VPA). ±₹1 tolerance.
+  /// Verify [screenshotJpg] paid [expectedRupees] to [ourUpiId] / [ourName].
+  /// Never throws. [ourName] is kept for signature compatibility; the server
+  /// matches on the UPI id.
   Future<PaymentCheck> verify({
     required Uint8List screenshotJpg,
     required double expectedRupees,
@@ -51,114 +41,74 @@ Rules:
     String? ourName,
   }) async {
     try {
-      final res = await _m.generateContent([
-        Content.multi([
-          TextPart(_prompt),
-          InlineDataPart('image/jpeg', screenshotJpg),
-        ]),
-      ]).timeout(const Duration(seconds: 30)); // never hang the money path
-      final map = jsonDecode(_extractJson((res.text ?? '').trim()))
-          as Map<String, dynamic>;
+      final res = await BackendApi.verifyPayment(
+        screenshotJpg: screenshotJpg,
+        amountRupees: expectedRupees,
+        ourUpiId: ourUpiId,
+      );
 
-      final status = '${map['status'] ?? 'unknown'}'.toLowerCase();
-      final amount = map['amount'] is num
-          ? (map['amount'] as num).toDouble()
-          : double.tryParse('${map['amount']}');
-      final utr = '${map['utr'] ?? ''}'.trim();
-      final payeeName = '${map['payeeName'] ?? ''}'.trim();
-      final payeeUpi = '${map['payeeUpiId'] ?? ''}'.trim();
-      final payee = payeeUpi.isNotEmpty ? payeeUpi : payeeName;
-      String? nn(String s) => s.isEmpty ? null : s;
+      final status = res['httpStatus'] is int ? res['httpStatus'] as int : 0;
+      final verified = status == 200 && res['verified'] == true;
+      final reason = _str(res['reason']) ??
+          (verified
+              ? 'Payment of ₹${expectedRupees.toStringAsFixed(0)} confirmed.'
+              : "Couldn't verify the payment right now. Check your internet "
+                  'and try again.');
 
-      if (status != 'success') {
+      final amount = res['amount'] is num
+          ? (res['amount'] as num).toDouble()
+          : double.tryParse('${res['amount'] ?? ''}');
+      final token = _str(res['token']);
+
+      // 503 ai_unconfigured (and any other non-200): the server reason is shown
+      // verbatim and the payment is NEVER treated as paid.
+      if (!verified) {
+        if (status == 503) {
+          debugPrint('[PaymentVerifier] server ai_unconfigured: $reason');
+        }
         return PaymentCheck(
           verified: false,
-          reason: status == 'failed'
-              ? 'That screenshot shows the payment FAILED. Please pay again and re-attach.'
-              : 'Couldn\'t read a successful payment. Please attach a clear "payment successful" screenshot.',
+          reason: reason,
           amountRead: amount,
-          utr: nn(utr),
-          payee: nn(payee),
+          utr: _str(res['utr']),
+          payee: _str(res['payee']),
         );
       }
-      if (amount == null) {
+
+      if (token == null) {
+        // Defensive: a verified answer without a token can't be filed, so do
+        // not let the customer proceed on it.
+        debugPrint('[PaymentVerifier] verified but no token in response');
         return PaymentCheck(
           verified: false,
-          reason: 'Couldn\'t read the amount. Please attach a clearer screenshot.',
-          utr: nn(utr),
-          payee: nn(payee),
-        );
-      }
-      if ((amount - expectedRupees).abs() > 1.0) {
-        return PaymentCheck(
-          verified: false,
-          reason:
-              'The screenshot shows ₹${amount.toStringAsFixed(0)} but your order is ₹${expectedRupees.toStringAsFixed(0)}. Please pay the exact amount.',
+          reason: "Couldn't confirm the payment right now. Please try again.",
           amountRead: amount,
-          utr: nn(utr),
-          payee: nn(payee),
+          utr: _str(res['utr']),
+          payee: _str(res['payee']),
         );
       }
-      final match = _payeeMatches(payeeUpi, payeeName, ourUpiId, ourName);
-      if (match.known && !match.ok) {
-        return PaymentCheck(
-          verified: false,
-          reason:
-              'This payment went to a different account. Please scan the QR shown here and pay again.',
-          amountRead: amount,
-          utr: nn(utr),
-          payee: nn(payee),
-        );
-      }
-      // Require the UTR / UPI transaction id: it is how the shop reconciles the
-      // payment against the bank and stops the same screenshot being reused.
-      if (utr.isEmpty) {
-        return PaymentCheck(
-          verified: false,
-          reason:
-              'We couldn\'t read the transaction ID (UTR) on this screenshot. Please attach the full "payment successful" screen that shows the UPI transaction ID / UTR.',
-          amountRead: amount,
-          payee: nn(payee),
-        );
-      }
+
       return PaymentCheck(
         verified: true,
-        reason: 'Payment of ₹${amount.toStringAsFixed(0)} confirmed. ✅',
+        reason: reason,
         amountRead: amount,
-        utr: nn(utr),
-        payee: nn(payee),
+        utr: _str(res['utr']),
+        payee: _str(res['payee']),
+        token: token,
       );
     } catch (e) {
       debugPrint('[PaymentVerifier] verify failed: $e');
       return const PaymentCheck(
         verified: false,
         reason:
-            'Couldn\'t verify the payment right now. Check your internet and try again.',
+            "Couldn't verify the payment right now. Check your internet and try again.",
       );
     }
   }
 
-  /// Soft payee check: returns (ok) only meaningful when (known) — i.e. we both
-  /// know our own id/name AND read one off the screenshot.
-  ({bool ok, bool known}) _payeeMatches(
-      String vpa, String name, String? ourUpi, String? ourName) {
-    String n(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9@._]'), '');
-    final v = n(vpa);
-    final ou = ourUpi == null ? '' : n(ourUpi);
-    // Hard match/mismatch ONLY on the VPA (unambiguous). UPI apps routinely
-    // shorten / reorder / drop middle names on the receipt, so a name mismatch
-    // must NOT hard-reject a genuine payment — the shop's bank reconciliation
-    // is the real gate. When the VPA isn't shown, treat payee as unknown (soft).
-    if (ou.isNotEmpty && v.isNotEmpty) {
-      final ok = v == ou || v.contains(ou) || ou.contains(v);
-      return (ok: ok, known: true);
-    }
-    return (ok: true, known: false);
-  }
-
-  String _extractJson(String s) {
-    final i = s.indexOf('{');
-    final j = s.lastIndexOf('}');
-    return (i >= 0 && j > i) ? s.substring(i, j + 1) : s;
+  static String? _str(Object? v) {
+    if (v == null) return null;
+    final s = '$v'.trim();
+    return s.isEmpty ? null : s;
   }
 }

@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
-import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -36,6 +37,10 @@ class _CropScreenState extends State<CropScreen> {
   final Set<String> _autoOriented = {};
   final GlobalKey _viewerKey = GlobalKey();
 
+  /// EXIF-upright pixel size per photo (from the orientation probe), needed to
+  /// turn the viewer matrix into a crop rect the export can reproduce.
+  final Map<String, Size> _sizes = {};
+
   TransformationController _ctrlFor(String id) =>
       _controllers.putIfAbsent(id, () => TransformationController());
 
@@ -68,9 +73,60 @@ class _CropScreenState extends State<CropScreen> {
         offsetY: m.getTranslation().y,
         scale: m.getMaxScaleOnAxis(),
         rotationSteps: _rotFor(item.id),
+        crop: _cropRectFor(item.id, m),
       ),
     );
     _advance();
+  }
+
+  /// The frame the customer is looking at, expressed in the ROTATED photo's
+  /// normalised coordinates. The viewer shows the photo BoxFit.contain inside
+  /// a W×H frame (RotatedBox swaps the photo's sides for odd turns); the
+  /// InteractiveViewer matrix maps that scene onto the frame. Inverting it at
+  /// the frame's corners gives the visible scene rect, which is then rebased
+  /// onto the contain-fitted photo box. Null when the on-screen size or the
+  /// photo size is unknown (export falls back to centre-cover).
+  Rect? _cropRectFor(String id, Matrix4 m) {
+    final box = _viewerKey.currentContext?.findRenderObject() as RenderBox?;
+    final photo = _sizes[id];
+    if (box == null || !box.hasSize || photo == null) return null;
+    final w = box.size.width;
+    final h = box.size.height;
+    if (w <= 0 || h <= 0 || photo.width <= 0 || photo.height <= 0) return null;
+
+    final odd = _rotFor(id).isOdd;
+    final pw = odd ? photo.height : photo.width;
+    final ph = odd ? photo.width : photo.height;
+    final r = pw / ph;
+    final frameAspect = w / h;
+    final cw = r > frameAspect ? w : h * r;
+    final ch = r > frameAspect ? w / r : h;
+    final ox = (w - cw) / 2;
+    final oy = (h - ch) / 2;
+
+    final Matrix4 inv;
+    try {
+      inv = Matrix4.inverted(m);
+    } catch (_) {
+      return null; // singular matrix: nothing sensible to record
+    }
+    final tl = inv.transform3(Vector3(0, 0, 0));
+    final br = inv.transform3(Vector3(w, h, 0));
+    final rect = Rect.fromLTRB(
+      (tl.x - ox) / cw,
+      (tl.y - oy) / ch,
+      (br.x - ox) / cw,
+      (br.y - oy) / ch,
+    );
+    if (!rect.left.isFinite ||
+        !rect.top.isFinite ||
+        !rect.right.isFinite ||
+        !rect.bottom.isFinite ||
+        rect.width <= 0 ||
+        rect.height <= 0) {
+      return null;
+    }
+    return rect;
   }
 
   /// Mark EVERY photo as skipped (white-pad) and jump to cart. Covers all
@@ -186,6 +242,7 @@ class _CropScreenState extends State<CropScreen> {
     try {
       final size = await _resolveImageSize(item.localPath);
       if (!mounted) return;
+      _sizes[item.id] = size;
       final best = _bestRotation(size, frameAspect);
       if (best != 0 && _rotFor(item.id) == 0) {
         setState(() {
@@ -197,26 +254,62 @@ class _CropScreenState extends State<CropScreen> {
     }
   }
 
-  Future<Size> _resolveImageSize(String path) {
-    final completer = Completer<Size>();
-    final provider = CachedNetworkImageProvider(path);
-    final stream = provider.resolve(const ImageConfiguration());
-    late final ImageStreamListener listener;
-    listener = ImageStreamListener(
-      (info, _) {
-        completer.complete(Size(
-          info.image.width.toDouble(),
-          info.image.height.toDouble(),
-        ));
-        stream.removeListener(listener);
-      },
-      onError: (e, _) {
-        completer.completeError(e);
-        stream.removeListener(listener);
-      },
-    );
-    stream.addListener(listener);
-    return completer.future;
+  /// Decode width used to probe a photo's orientation. Only the W:H ratio is
+  /// needed, so a thumbnail-sized decode is plenty.
+  static const int _probeWidth = 96;
+
+  /// Reads the photo's (EXIF-oriented) pixel dimensions WITHOUT holding a
+  /// full-resolution decode. On native the encoded bytes go straight into an
+  /// [ui.ImmutableBuffer] and the codec is instantiated with a 96-px
+  /// `targetWidth`, so the JPEG decoder sub-samples and only a tiny bitmap is
+  /// ever materialised (a 12 MP photo decoded at full size is ~48 MB — doing
+  /// that for every photo while the crop viewer also held its own copy tripped
+  /// iOS's memory watchdog). On web (blob: URLs, no file path) the same
+  /// down-scaled decode goes through a [ResizeImage] provider.
+  Future<Size> _resolveImageSize(String path) async {
+    if (kIsWeb) {
+      final completer = Completer<Size>();
+      final provider = ResizeImage(NetworkImage(path), width: _probeWidth);
+      final stream = provider.resolve(const ImageConfiguration());
+      late final ImageStreamListener listener;
+      listener = ImageStreamListener(
+        (info, _) {
+          if (!completer.isCompleted) {
+            completer.complete(Size(
+              info.image.width.toDouble(),
+              info.image.height.toDouble(),
+            ));
+          }
+          stream.removeListener(listener);
+        },
+        onError: (e, _) {
+          if (!completer.isCompleted) completer.completeError(e);
+          stream.removeListener(listener);
+        },
+      );
+      stream.addListener(listener);
+      return completer.future;
+    }
+
+    ui.ImmutableBuffer? buffer;
+    ui.ImageDescriptor? descriptor;
+    ui.Codec? codec;
+    ui.FrameInfo? frame;
+    try {
+      buffer = await ui.ImmutableBuffer.fromFilePath(path);
+      descriptor = await ui.ImageDescriptor.encoded(buffer);
+      codec = await descriptor.instantiateCodec(targetWidth: _probeWidth);
+      frame = await codec.getNextFrame();
+      return Size(
+        frame.image.width.toDouble(),
+        frame.image.height.toDouble(),
+      );
+    } finally {
+      frame?.image.dispose();
+      codec?.dispose();
+      descriptor?.dispose();
+      buffer?.dispose();
+    }
   }
 
   @override

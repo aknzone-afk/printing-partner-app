@@ -1,28 +1,29 @@
-import 'dart:typed_data';
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../../models/print_packages.dart';
 
-/// Creates real orders in Firestore and uploads print-sheet JPGs — SPARK MODE
-/// (no Cloud Functions/Storage). Everything here is shaped to pass the
-/// Firestore security rules exactly:
+/// Creates real orders in Firestore — SPARK MODE (no Cloud Functions/Storage).
+/// Everything here is shaped to pass the Firestore security rules exactly:
 ///
 ///  - the order's money/quantity fields are copied FROM the catalog doc the
 ///    rules validate against (see isPricedFromCatalog in firestore.rules);
 ///  - the global order number is minted in a transaction on counters/orders
-///    (rules allow only exact +1 increments);
-///  - sheets travel as <=700 KB Blob chunks in orders/{id}/sheets, each doc
-///    exactly {sheet, chunk, of, bytes, expireAt}.
+///    (rules allow only exact +1 increments).
+///
+/// The photos themselves no longer travel through Firestore: after the order
+/// doc exists, checkout uploads each INDIVIDUAL cropped JPEG to the shop's
+/// backend (`BackendApi.ingest`) and records the outcome on the order doc via
+/// [markBackend] (`delivery.backendStatus`: pending_upload → filed /
+/// upload_failed / rejected). The state lives INSIDE the `delivery` map because
+/// the deployed rules (isOwnerProgressUpdate) let the owner touch only
+/// `delivery` + `updatedAt` — a top-level `backendStatus` write is denied.
+/// The old `orders/{id}/sheets` chunk subcollection is retired.
 class OrderRepository {
   OrderRepository._();
   static final OrderRepository instance = OrderRepository._();
 
   final FirebaseFirestore _db = FirebaseFirestore.instance;
-
-  static const int _chunkBytes = 700 * 1024;
-  static const Duration _sheetTtl = Duration(days: 30);
 
   /// Finds the catalog doc matching the app-side [pack]. Matches on
   /// (category slug, label, snapCount) — these are identical in
@@ -53,9 +54,23 @@ class OrderRepository {
     return (cat.data['priceInPaise'] as num).toInt();
   }
 
+  /// A fresh, client-chosen order document id. Checkout mints ONE per checkout
+  /// attempt and passes it to [createOrder], so a transaction that committed
+  /// server-side but whose acknowledgement was lost is found again on the
+  /// retry instead of minting a second order (+ second number).
+  String newOrderId() => _db.collection('orders').doc().id;
+
   /// Creates the Firestore order (minting the next global order number) and
   /// returns its id + number. Throws on rules rejection / network failure.
+  ///
+  /// Idempotent per [orderId]: if `orders/{orderId}` already exists (a previous
+  /// call committed but the client never got the answer) its number is
+  /// returned and nothing is written.
+  ///
+  /// The doc is created with `delivery.backendStatus: "pending_upload"`;
+  /// checkout flips it with [markBackend] once the photos reach the backend.
   Future<({String orderId, String orderNumber, int totalPaise})> createOrder({
+    required String orderId,
     required String uid,
     required PrintPack pack,
     required String customerName,
@@ -68,9 +83,10 @@ class OrderRepository {
       String pincode
     }) address,
     required int photoCount,
-    /// UPI payment confirmed by the in-app Gemini screenshot check, or null.
-    /// Written as an ADDITIVE field so the rules-validated `payment` map is
-    /// left exactly as the security rules expect.
+    /// UPI payment confirmed by the screenshot check (utr, amount, payee…), or
+    /// null. Written as an ADDITIVE field so the rules-validated `payment` map
+    /// is left exactly as the security rules expect. The backend payment
+    /// `token` is NEVER persisted — it is stripped here even if passed.
     Map<String, dynamic>? upiProof,
   }) async {
     final cat = await _findCatalogPack(pack);
@@ -80,8 +96,38 @@ class OrderRepository {
     final sheetsNeeded =
         perSheet > 0 ? ((snapCount + perSheet - 1) ~/ perSheet) : 1;
 
-    final orderRef = _db.collection('orders').doc();
+    // Defensive: the payment token is a bearer credential for /ingest and
+    // must never land in Firestore, whatever the caller handed us.
+    final Map<String, dynamic>? proof = upiProof == null
+        ? null
+        : (Map<String, dynamic>.of(upiProof)
+          ..remove('token')
+          ..remove('paymentToken'));
+
+    final orderRef = _db.collection('orders').doc(orderId);
     final counterRef = _db.collection('counters').doc('orders');
+
+    // Ack-lost retry: the doc may already exist from a committed transaction.
+    // Reading a NON-existent doc is denied by the rules (resource is null), so
+    // a permission error here simply means "not created yet".
+    try {
+      final existing = await orderRef.get();
+      if (existing.exists) {
+        final data = existing.data();
+        final number = (data?['orderNumber'] ?? '').toString();
+        if (number.isNotEmpty) {
+          debugPrint('[OrderRepository] $orderId already exists (#$number) — '
+              'reusing, no second order');
+          return (
+            orderId: orderId,
+            orderNumber: number,
+            totalPaise: (d['priceInPaise'] as num).toInt(),
+          );
+        }
+      }
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied') rethrow;
+    }
 
     final orderNumber = await _db.runTransaction<String>((txn) async {
       final counterSnap = await txn.get(counterRef);
@@ -133,12 +179,17 @@ class OrderRepository {
         'delivery': {
           'status': 'pending',
           'sheetsUploaded': 0,
+          // Backend (VM) filing state for the individual cropped photos:
+          // pending_upload → filed | upload_failed | rejected (markBackend).
+          // Inside `delivery` so the owner's later update passes the rules.
+          'backendStatus': 'pending_upload',
+          'backendError': null,
         },
         // Additive (not inside the rules-validated `payment` map): the UPI
-        // payment the customer made + Gemini's read of their screenshot. The
-        // shop reconciles the UTR against the bank; `payment.status` is left
-        // for the backend phase to flip.
-        if (upiProof != null) 'upiProof': {...upiProof, 'at': Timestamp.now()},
+        // payment the customer made + the screenshot read (utr, amount,
+        // payee). The shop reconciles the UTR against the bank;
+        // `payment.status` is left for the backend phase to flip.
+        if (proof != null) 'upiProof': {...proof, 'at': Timestamp.now()},
         'placedAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
@@ -152,53 +203,24 @@ class OrderRepository {
     );
   }
 
-  /// Uploads the order's print-sheet JPGs as Blob chunks. [onProgress] gets
-  /// (chunksDone, chunksTotal). Marks delivery.status='uploaded' when done.
-  Future<void> uploadSheets({
-    required String orderId,
-    required List<Uint8List> sheetJpgs,
-    void Function(int done, int total)? onProgress,
-  }) async {
-    final expireAt =
-        Timestamp.fromDate(DateTime.now().add(_sheetTtl));
-    final sheetsCol =
-        _db.collection('orders').doc(orderId).collection('sheets');
-
-    var total = 0;
-    for (final jpg in sheetJpgs) {
-      total += (jpg.length / _chunkBytes).ceil();
-    }
-    var done = 0;
-
-    for (var s = 0; s < sheetJpgs.length; s++) {
-      final jpg = sheetJpgs[s];
-      final of = (jpg.length / _chunkBytes).ceil();
-      for (var c = 0; c < of; c++) {
-        final start = c * _chunkBytes;
-        final end =
-            (start + _chunkBytes) > jpg.length ? jpg.length : start + _chunkBytes;
-        await sheetsCol.doc('${s + 1}_$c').set({
-          'sheet': s + 1,
-          'chunk': c,
-          'of': of,
-          'bytes': Blob(jpg.sublist(start, end)),
-          'expireAt': expireAt,
-        });
-        done++;
-        onProgress?.call(done, total);
-      }
-      // Track per-sheet progress on the order (owner-allowed update).
-      await _db.collection('orders').doc(orderId).update({
-        'delivery.sheetsUploaded': s + 1,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-    }
-
+  /// Records the backend filing outcome on the order doc (owner-allowed
+  /// update). [status] is one of `pending_upload`, `filed`, `upload_failed`,
+  /// `rejected`; [error] carries the backend's reason / exception text when
+  /// something went wrong (written as null otherwise, clearing an old one).
+  ///
+  /// Written as `delivery.backendStatus` etc.: the deployed rules allow the
+  /// owner to change only the `delivery` map and `updatedAt`, so this is the
+  /// one shape that is not answered with permission-denied.
+  Future<void> markBackend(String orderId, String status,
+      {String? error}) async {
     await _db.collection('orders').doc(orderId).update({
-      'delivery.status': 'uploaded',
+      'delivery.backendStatus': status,
+      'delivery.backendError':
+          error == null ? null : (error.length > 480 ? error.substring(0, 480) : error),
+      'delivery.backendUpdatedAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
     });
-    debugPrint('[OrderRepository] $orderId: ${sheetJpgs.length} sheets '
-        '($done chunks) uploaded');
+    debugPrint('[OrderRepository] $orderId: backendStatus=$status'
+        '${error == null ? '' : ' ($error)'}');
   }
 }

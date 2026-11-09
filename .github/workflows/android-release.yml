@@ -1,0 +1,80 @@
+# Android release bundle for Google Play.
+#
+# Signs with the owner's UPLOAD keystore, which is never committed. Two
+# repository secrets carry it (Settings -> Secrets and variables -> Actions):
+#   ANDROID_KEYSTORE_B64    base64 of android/upload-keystore.jks
+#                           (base64 -w0 upload-keystore.jks)
+#   ANDROID_KEY_PROPERTIES  the full text of android/key.properties with
+#                           storeFile=upload-keystore.jks
+# Without them the build still runs but is DEBUG-signed (Play rejects it), and
+# the job fails loudly so a debug AAB is never mistaken for a release.
+#
+# One-time owner steps (offline, keep the .jks + passwords backed up outside
+# the repo):
+#   keytool -genkey -v -keystore android/upload-keystore.jks -storetype JKS \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+#   cp android/key.properties.example android/key.properties  # fill it in
+# Enrol in Play App Signing on the first upload.
+name: Android release (AAB)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'android-v*'
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.9
+          cache: true
+
+      - name: Restore upload keystore from secrets
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ] || [ -z "$ANDROID_KEY_PROPERTIES" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 / ANDROID_KEY_PROPERTIES secrets are not set - the AAB would be debug-signed and Play would reject it."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > android/upload-keystore.jks
+          printf '%s\n' "$ANDROID_KEY_PROPERTIES" > android/key.properties
+          test -s android/upload-keystore.jks
+
+      - run: flutter pub get
+
+      - run: flutter analyze lib
+
+      - name: Build release app bundle
+        run: flutter build appbundle --release
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f android/upload-keystore.jks android/key.properties
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: printing-partner-release-aab
+          path: app/build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 30

@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui' show Rect;
 
 import 'package:flutter/foundation.dart';
 
@@ -198,7 +199,11 @@ class Cart extends ChangeNotifier {
 /// User's crop choice for a single photo.
 /// - [skipped] = customer chose to skip cropping; renderer should letterbox
 ///   (white-pad) the photo to fit the target aspect.
-/// - [offsetX], [offsetY], [scale] describe the user-edited crop position.
+/// - [crop] = the frame the customer actually saw, as a rect NORMALISED to the
+///   (rotated, EXIF-upright) photo: (0,0)-(1,1) is the whole photo; values
+///   outside 0..1 are white margin the customer zoomed out into. This is what
+///   the export prints. Null = legacy centre-cover ("Auto crop").
+/// - [offsetX], [offsetY], [scale] are the raw viewer matrix (display only).
 /// - [rotationSteps] = number of 90° clockwise rotations applied (0..3).
 class CropEdit {
   const CropEdit({
@@ -207,6 +212,7 @@ class CropEdit {
     this.offsetY = 0,
     this.scale = 1,
     this.rotationSteps = 0,
+    this.crop,
   });
 
   const CropEdit.skipped({int rotationSteps = 0})
@@ -216,12 +222,14 @@ class CropEdit {
     required double offsetY,
     required double scale,
     int rotationSteps = 0,
+    Rect? crop,
   }) : this(
           skipped: false,
           offsetX: offsetX,
           offsetY: offsetY,
           scale: scale,
           rotationSteps: rotationSteps,
+          crop: crop,
         );
 
   final bool skipped;
@@ -229,4 +237,5 @@ class CropEdit {
   final double offsetY;
   final double scale;
   final int rotationSteps;
+  final Rect? crop;
 }

@@ -95,7 +95,7 @@ class _HomeTab extends StatelessWidget {
               title: 'Snaps',
               ctaLabel: 'Print Now',
               bgColor: AppColors.lavender,
-              accentColor: AppColors.primary,
+              accentColor: AppColors.primaryDark,
               imageIds: const [1027, 1062, 64], // family / friends / portrait
               variant: _ProductVariant.scatteredPolaroids,
               onTap: () => context.push('/photo-packages'),
@@ -115,7 +115,7 @@ class _HomeTab extends StatelessWidget {
               title: 'SnapBook',
               ctaLabel: 'Print Now',
               bgColor: AppColors.blush,
-              accentColor: AppColors.primary,
+              accentColor: AppColors.primaryDark,
               imageIds: const [1015, 152], // mountain + ocean (book pages)
               variant: _ProductVariant.openBook,
               onTap: () => context.push('/snapbook-packages'),
@@ -217,15 +217,21 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
           children: [
             Row(
               children: [
-                Text(
-                  order.displayId,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: AppColors.primary,
+                // Expanded (not Spacer) so a long id + the status chip never
+                // overflow at 1.3x text scale; dark purple for small text.
+                Expanded(
+                  child: Text(
+                    order.displayId,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.primaryDark,
+                    ),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 10, vertical: 4),
@@ -261,13 +267,17 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
             const SizedBox(height: 12),
             Row(
               children: [
-                Text(
-                  order.totalLabel,
-                  style: const TextStyle(
-                      fontSize: 18, fontWeight: FontWeight.w800),
+                Expanded(
+                  child: Text(
+                    order.totalLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w800),
+                  ),
                 ),
-                const Spacer(),
-                _customerDownloadButton(order),
+                const SizedBox(width: 8),
+                Flexible(child: _customerDownloadButton(order)),
               ],
             ),
           ],
@@ -282,36 +292,53 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
         final mb = order.pdfBytes == null
             ? '?'
             : (order.pdfBytes!.length / (1024 * 1024)).toStringAsFixed(2);
-        return Material(
-          color: AppColors.primary,
-          borderRadius: BorderRadius.circular(8),
-          child: InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: _busy ? null : _download,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _busy
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.download_rounded,
-                          size: 16, color: Colors.white),
-                  const SizedBox(width: 6),
-                  Text(
-                    'PDF · $mb MB',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.white,
+        // 48-dp minimum tap target; labelled for screen readers; the text
+        // shrinks with an ellipsis instead of overflowing at 1.3x scale.
+        return Semantics(
+          button: true,
+          enabled: !_busy,
+          label: _busy ? 'Downloading PDF' : 'Download PDF, $mb megabytes',
+          child: Tooltip(
+            message: 'Download print-sheet PDF',
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
+              child: Material(
+                color: AppColors.primaryDark,
+                borderRadius: BorderRadius.circular(8),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: _busy ? null : _download,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _busy
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.download_rounded,
+                                size: 16, color: Colors.white),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'PDF · $mb MB',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -329,14 +356,19 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
               SizedBox(
                 width: 12,
                 height: 12,
-                child: CircularProgressIndicator(strokeWidth: 1.5),
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.5, color: AppColors.primaryDark),
               ),
               SizedBox(width: 6),
-              Text('Preparing PDF…',
-                  style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      color: AppColors.primary)),
+              Flexible(
+                child: Text('Preparing PDF…',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.primaryDark)),
+              ),
             ],
           ),
         );
@@ -390,11 +422,13 @@ class _ProfileTab extends StatelessWidget {
                   Row(
                     children: [
                       Icon(Icons.verified_user_outlined,
-                          color: AppColors.primary),
+                          color: AppColors.primaryDark),
                       SizedBox(width: 10),
-                      Text('No login needed',
-                          style: TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w700)),
+                      Expanded(
+                        child: Text('No login needed',
+                            style: TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w700)),
+                      ),
                     ],
                   ),
                   SizedBox(height: 8),
@@ -453,64 +487,76 @@ class _ProductCard extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
-        child: Container(
-          height: 180,
-          padding: const EdgeInsets.fromLTRB(20, 20, 16, 16),
-          child: Row(
-            children: [
-              // Left: title + CTA pill
-              Expanded(
-                flex: 4,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // FittedBox keeps the title on one line — auto-shrinks
-                      // longer labels like "SnapBook" to fit the column width
-                      // instead of wrapping.
-                    FittedBox(
-                      fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        title,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w800,
-                          color: accentColor,
-                          height: 1.0,
-                        ),
-                      ),
-                    ),
-                    Row(
-                      children: [
-                        Text(
-                          ctaLabel,
+        // Semantics on the InkWell: one named button per card for TalkBack /
+        // VoiceOver; the visual on the right is decorative and excluded.
+        child: Semantics(
+          button: true,
+          label: '$title. $ctaLabel',
+          child: Container(
+            height: 180,
+            padding: const EdgeInsets.fromLTRB(20, 20, 16, 16),
+            child: Row(
+              children: [
+                // Left: title + CTA pill
+                Expanded(
+                  flex: 4,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // FittedBox keeps the title on one line — auto-shrinks
+                        // longer labels like "SnapBook" to fit the column width
+                        // instead of wrapping.
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          softWrap: false,
                           style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
+                            fontSize: 26,
+                            fontWeight: FontWeight.w800,
                             color: accentColor,
+                            height: 1.0,
                           ),
                         ),
-                        const SizedBox(width: 4),
-                        Icon(Icons.arrow_forward_rounded,
-                            size: 16, color: accentColor),
-                      ],
+                      ),
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              ctaLabel,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: accentColor,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(Icons.arrow_forward_rounded,
+                              size: 16, color: accentColor),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // Right: visual representation of the product
+                Expanded(
+                  flex: 5,
+                  child: ExcludeSemantics(
+                    child: _ProductVisual(
+                      variant: variant,
+                      imageIds: imageIds,
+                      accentColor: accentColor,
                     ),
-                  ],
+                  ),
                 ),
-              ),
-              // Right: visual representation of the product
-              Expanded(
-                flex: 5,
-                child: _ProductVisual(
-                  variant: variant,
-                  imageIds: imageIds,
-                  accentColor: accentColor,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

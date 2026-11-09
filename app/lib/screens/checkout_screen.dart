@@ -10,17 +10,34 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../models/cart.dart';
 import '../models/order_record.dart';
 import '../models/orders_store.dart';
+import '../models/print_packages.dart';
+import '../services/backend_api.dart';
 import '../services/firebase/auth_service.dart';
 import '../services/firebase/order_repository.dart';
 import '../services/payment_verifier.dart';
-import '../services/sheet_pdf.dart';
+import '../services/pending_upload.dart';
+import '../services/photo_export.dart';
 import '../services/upi_qr.dart';
 import '../theme.dart';
 import '../widgets/primary_button.dart';
 
 /// UPI payment: the customer scans our QR (amount baked in), pays in their UPI
-/// app, and attaches the payment screenshot. Gemini reads it in-app, matches
-/// the amount, and only then is the order placed. ₹0 — no payment gateway.
+/// app, and attaches the payment screenshot. The backend reads it, matches the
+/// amount, and hands back a one-time payment token. Only then is the order
+/// placed and every INDIVIDUAL cropped photo uploaded to the shop's backend
+/// (`/ingest`). ₹0 — no payment gateway, no Firestore blobs.
+///
+/// Outcomes of `/ingest` and what the screen does:
+///  * 200 (incl. `duplicate:true` = already filed on an earlier attempt whose
+///    answer was lost) → order complete, local record written, cart cleared.
+///  * 409 for THIS order number → same as 200 (filed earlier); 409 for a
+///    different order → real rejection (UTR used elsewhere), no retry.
+///  * 402 `token_expired` → the order is KEPT; the customer re-attaches the
+///    same screenshot to get a fresh pass and the upload resumes for it.
+///  * 402 anything else (forged / amount mismatch) → rejection, no retry.
+///  * network / 5xx / 413 → "Retry upload" with the same order + token.
+/// The resume tuple is persisted ([PendingUpload]) so leaving the screen or
+/// an app kill mid-upload never mints a second order.
 class CheckoutScreen extends StatefulWidget {
   const CheckoutScreen({super.key});
 
@@ -36,33 +53,132 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// The authoritative price (paise) read from the catalog — the amount the
   /// order will actually book. Used for the QR + the screenshot amount-check so
   /// the customer never pays a value the order would then be rejected for.
+  /// Null until loaded; there is NO fallback to the client-side price (that
+  /// would let a catalog/print_packages drift book a different amount than
+  /// was paid), only a Retry.
   int? _authoritativePaise;
+  bool _priceError = false;
 
-  /// Set once the order exists in Firestore, so a retry after a failed sheet
+  /// Client-chosen Firestore id for this checkout attempt. Minted once and
+  /// reused, so a createOrder whose commit succeeded but whose answer was lost
+  /// is found again instead of producing a second order + number.
+  String? _orderDocId;
+
+  /// Set once the order exists in Firestore, so a retry after a failed photo
   /// upload RESUMES the upload instead of minting a SECOND order (honours the
-  /// "never create duplicate orders" rule).
+  /// "never create duplicate orders" rule). Mirrored to [PendingUpload] so the
+  /// same holds across a back-press or an app kill.
   String? _placedOrderId;
-  Map<String, dynamic>? _placedProof;
+  String? _placedOrderNumber;
+  String? _placedAtIso;
+  String? _placedUid;
+
+  /// The backend payment token from the verified screenshot. Never written to
+  /// Firestore. Null while a kept order needs a fresh pass (402 token_expired).
+  String? _placedToken;
+
+  /// True when the backend said the pass expired: the order is kept and the
+  /// next tap re-attaches the SAME screenshot for it (no new order).
+  bool _needsFreshToken = false;
+
+  /// True once /ingest has been attempted with the current token — a later
+  /// 409 without an orderNumber is then read as "filed on that attempt".
+  bool _ingestAttempted = false;
+
+  /// Rendered cropped JPEGs, cached so a Retry re-runs ONLY the upload.
+  List<Uint8List>? _renderedJpgs;
+
+  /// Upload reached a terminal state: a network/server failure that can be
+  /// retried, or a real 402/409 rejection that must NOT be retried.
+  bool _uploadFailed = false;
+  bool _rejected = false;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadPrice());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadPrice();
+      _restorePending();
+    });
   }
+
+  static String _packKey(PrintPack pack) =>
+      '${pack.size.category.slug}|${pack.size.label}|${pack.snapCount}';
 
   Future<void> _loadPrice() async {
     final pack = context.read<Cart>().selectedPack;
     if (pack == null) return;
+    if (_priceError) setState(() => _priceError = false);
     try {
       final paise = await OrderRepository.instance.catalogPriceInPaise(pack);
       if (mounted) setState(() => _authoritativePaise = paise);
-    } catch (_) {
-      // Offline / catalog unreachable: fall back to the cart price for display;
-      // createOrder re-checks the catalog and surfaces a real error if needed.
-      if (mounted) {
-        setState(() => _authoritativePaise = context.read<Cart>().totalPaise);
-      }
+    } catch (e) {
+      debugPrint('[Checkout] catalog price failed: $e');
+      // No fallback to the client-side price: the QR and the server amount
+      // check must only ever use the price the order will book.
+      if (mounted) setState(() => _priceError = true);
     }
+  }
+
+  /// Re-enters "Retry upload" / "Re-attach screenshot" mode for an order that
+  /// was paid and created earlier but whose photos never reached the backend
+  /// (screen left, app killed). Only when the SAME cart is still here.
+  Future<void> _restorePending() async {
+    final rec = await PendingUpload.load();
+    if (!mounted || rec == null) return;
+    if (_placedOrderId != null || _busy) return; // already placing here
+    final cart = context.read<Cart>();
+    final pack = cart.selectedPack;
+    if (pack == null ||
+        cart.isEmpty ||
+        _packKey(pack) != rec.packKey ||
+        cart.itemCount != rec.photoCount) {
+      // A different cart (new pack picked): leave the record alone, it
+      // expires with the token. This checkout is a new order.
+      debugPrint('[Checkout] pending upload #${rec.orderNumber} does not '
+          'match this cart — not resumed');
+      return;
+    }
+    setState(() {
+      _orderDocId = rec.orderId;
+      _placedOrderId = rec.orderId;
+      _placedOrderNumber = rec.orderNumber;
+      _placedAtIso = rec.placedAtIso.isEmpty ? null : rec.placedAtIso;
+      _placedUid = rec.uid.isEmpty ? null : rec.uid;
+      _placedToken = rec.token;
+      _ingestAttempted = rec.ingestAttempted;
+      _needsFreshToken = rec.token == null;
+      _authoritativePaise ??= rec.amountPaise > 0 ? rec.amountPaise : null;
+      _uploadFailed = true;
+      _rejected = false;
+      _error = _needsFreshToken
+          ? 'Your upload pass expired. Tap below and re-attach the same '
+              'payment screenshot — your order #${rec.orderNumber} is kept.'
+          : 'Your payment is confirmed and order #${rec.orderNumber} is '
+              'placed, but your photos have not reached us yet. Tap Retry '
+              'upload to send them.';
+    });
+  }
+
+  Future<void> _persistPending() async {
+    if (!mounted) return; // needs the cart from context
+    final orderId = _placedOrderId;
+    final number = _placedOrderNumber;
+    final cart = context.read<Cart>();
+    final pack = cart.selectedPack;
+    if (orderId == null || number == null || pack == null) return;
+    await PendingUpload.save(PendingUpload(
+      orderId: orderId,
+      orderNumber: number,
+      placedAtIso: _placedAtIso ?? '',
+      token: _placedToken,
+      uid: _placedUid ?? AuthService.instance.uid ?? '',
+      packKey: _packKey(pack),
+      photoCount: cart.itemCount,
+      amountPaise: _authoritativePaise ?? 0,
+      ingestAttempted: _ingestAttempted,
+      savedAtMs: DateTime.now().millisecondsSinceEpoch,
+    ));
   }
 
   void _setStage(String s) {
@@ -71,42 +187,40 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _attachAndVerify() async {
     if (_busy) return; // re-entrancy guard (double-tap / fast re-tap)
+    if (_rejected) return; // backend refused the payment: nothing to retry
 
-    // Already paid + order created, but a prior sheet upload failed: resume the
+    // Already paid + order created, but the photo upload failed: resume the
     // upload directly — don't make the customer re-pick / re-verify the
     // screenshot, and never create a second order.
-    if (_placedOrderId != null) {
+    if (_placedOrderId != null && _placedToken != null) {
       setState(() {
         _busy = true;
         _error = null;
+        _uploadFailed = false;
         _stage = 'Finishing your order…';
       });
-      try {
-        await _placeOrder(
-            upiProof:
-                _placedProof ?? {'method': 'upi', 'geminiVerified': true});
-      } catch (e) {
-        debugPrint('[Checkout] resume failed: $e');
-        if (mounted) {
-          setState(() {
-            _busy = false;
-            _stage = '';
-            _error = 'Still finishing your print sheets — tap to retry.';
-          });
-        }
-      }
+      await _uploadToBackend();
       return;
     }
+
+    // Fresh order, OR a kept order whose upload pass expired (re-attach the
+    // same screenshot for it). Both need the catalog price for the check.
+    final paise = _authoritativePaise;
+    if (paise == null) {
+      _showSnack('The price has not loaded yet. Tap Retry above.');
+      return;
+    }
+    final reattach = _placedOrderId != null;
 
     // Claim the flow SYNCHRONOUSLY before the async gallery pick, so a fast
     // double-tap can't start two orders (NEVER-duplicate-orders rule).
     setState(() {
       _busy = true;
       _error = null;
+      if (reattach) _uploadFailed = false;
     });
 
-    final rupees =
-        (_authoritativePaise ?? context.read<Cart>().totalPaise) / 100.0;
+    final rupees = paise / 100.0;
 
     // 1. Pick the payment screenshot.
     final XFile? picked;
@@ -114,20 +228,26 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       picked = await ImagePicker()
           .pickImage(source: ImageSource.gallery, imageQuality: 90);
     } catch (e) {
-      if (mounted) setState(() => _busy = false);
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        if (reattach) _uploadFailed = true;
+      });
       _showSnack('Could not open your gallery: $e');
       return;
     }
+    if (!mounted) return;
     if (picked == null) {
-      if (mounted) setState(() => _busy = false);
+      setState(() {
+        _busy = false;
+        if (reattach) _uploadFailed = true;
+      });
       return; // cancelled
     }
-
-    if (!mounted) return;
     setState(() => _stage = 'Reading your payment…');
 
     try {
-      // 2. Compress to JPEG for Gemini.
+      // 2. Compress to JPEG for the verifier.
       final jpg = await FlutterImageCompress.compressWithFile(
         picked.path,
         minWidth: 1400,
@@ -136,8 +256,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         format: CompressFormat.jpeg,
       );
       final Uint8List bytes = jpg ?? await picked.readAsBytes();
+      if (!mounted) return;
 
-      // 3. Verify with Gemini (amount + soft payee match + UTR capture).
+      // 3. Verify (amount + soft payee match + UTR capture → payment token).
       final hasPayee = UpiQr.merchantUpiId.isNotEmpty;
       final check = await PaymentVerifier.instance.verify(
         screenshotJpg: bytes,
@@ -145,25 +266,56 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         ourUpiId: hasPayee ? UpiQr.merchantUpiId : null,
         ourName: hasPayee ? UpiQr.merchantName : null,
       );
+      if (!mounted) return;
 
       if (!check.verified) {
-        if (!mounted) return;
         setState(() {
           _busy = false;
           _stage = '';
           _error = check.reason;
+          if (reattach) _uploadFailed = true;
         });
         return;
       }
 
-      // 4. Payment confirmed → place the order.
-      await _placeOrder(upiProof: {
-        'method': 'upi',
-        'amountRupees': check.amountRead ?? rupees,
-        'utr': check.utr ?? '',
-        'payee': check.payee ?? '',
-        'geminiVerified': true,
-      });
+      // A verified check without a token cannot be filed (the backend needs
+      // it on /ingest) — fail BEFORE any order is created.
+      final String? token = check.token;
+      if (token == null || token.isEmpty) {
+        setState(() {
+          _busy = false;
+          _stage = '';
+          _error =
+              'Payment looked fine but we did not get an upload pass from the '
+              'server. Please tap again to re-attach the screenshot.';
+          if (reattach) _uploadFailed = true;
+        });
+        return;
+      }
+
+      if (reattach) {
+        // 4a. Fresh pass for the KEPT order: resume its upload, no new order.
+        _placedToken = token;
+        _needsFreshToken = false;
+        await _persistPending();
+        if (!mounted) return;
+        await _uploadToBackend();
+        return;
+      }
+
+      // 4b. Payment confirmed → place the order + upload the photos.
+      //     (The token is deliberately NOT part of the proof written to
+      //     Firestore — it stays in memory + the local pending record only.)
+      await _placeOrder(
+        upiProof: {
+          'method': 'upi',
+          'amountRupees': check.amountRead ?? rupees,
+          'utr': check.utr ?? '',
+          'payee': check.payee ?? '',
+          'geminiVerified': true,
+        },
+        token: token,
+      );
     } catch (e) {
       debugPrint('[Checkout] verify/place failed: $e');
       if (mounted) {
@@ -172,16 +324,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           _stage = '';
           _error = _placedOrderId == null
               ? 'Something went wrong: $e'
-              : 'Your payment was accepted and the order is placed — we\'re still '
-                  'finishing the print sheets. Tap again to retry just that step.';
+              : 'Your payment was accepted and the order is placed — we\'re '
+                  'still sending your photos. Tap Retry upload to finish.';
+          if (_placedOrderId != null) _uploadFailed = true;
         });
       }
     }
   }
 
-  Future<void> _placeOrder({required Map<String, dynamic> upiProof}) async {
+  Future<void> _placeOrder({
+    required Map<String, dynamic> upiProof,
+    required String token,
+  }) async {
     final cart = context.read<Cart>();
-    final orders = context.read<OrdersStore>();
     final pack = cart.selectedPack;
     if (pack == null) {
       setState(() {
@@ -191,18 +346,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
-    final cachedBytes = cart.pdfBytes; // built at /upload
-
-    // 1. Create the order ONCE. A retry after a failed sheet upload reuses the
+    // 1. Create the order ONCE. A retry after a failed upload reuses the
     //    already-created order so a second order/number is never minted.
-    String orderId;
-    if (_placedOrderId != null) {
-      orderId = _placedOrderId!;
-    } else {
+    if (_placedOrderId == null) {
       _setStage('Placing order…');
       final uid = await AuthService.instance.ensureSignedIn();
+      if (!mounted) return;
       if (uid == null) {
-        if (!mounted) return;
         setState(() {
           _busy = false;
           _stage = '';
@@ -210,7 +360,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         });
         return;
       }
+      // Stable per checkout attempt: an ack-lost commit is found on re-tap.
+      _orderDocId ??= OrderRepository.instance.newOrderId();
       final created = await OrderRepository.instance.createOrder(
+        orderId: _orderDocId!,
         uid: uid,
         pack: pack,
         customerName:
@@ -226,70 +379,236 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         photoCount: cart.itemCount,
         upiProof: upiProof,
       );
-      orderId = created.orderId;
-      _placedOrderId = orderId; // survive a later sheet-upload failure
-      _placedProof = upiProof;
+      // Survive a later upload failure (no second order, same token) — in
+      // memory AND on disk, so a back-press / app kill resumes this order.
+      _placedOrderId = created.orderId;
+      _placedOrderNumber = created.orderNumber;
+      _placedAtIso = DateTime.now().toUtc().toIso8601String();
+      _placedUid = uid;
+      _placedToken = token;
+      _ingestAttempted = false;
+      if (!mounted) {
+        // The State is gone, but the order exists: record it for resume.
+        await PendingUpload.save(PendingUpload(
+          orderId: created.orderId,
+          orderNumber: created.orderNumber,
+          placedAtIso: _placedAtIso ?? '',
+          token: token,
+          uid: uid,
+          packKey: _packKey(pack),
+          photoCount: cart.itemCount,
+          amountPaise: _authoritativePaise ?? 0,
+          ingestAttempted: false,
+          savedAtMs: DateTime.now().millisecondsSinceEpoch,
+        ));
+        return;
+      }
+      await _persistPending();
+      if (!mounted) return;
     }
 
-    // 2. Rasterise + upload the print sheets (per-chunk set() is idempotent,
-    //    so a resume re-sends the same chunks safely).
-    if (cachedBytes != null) {
-      _setStage('Preparing print sheets…');
-      final jpgs = await SheetPdfService.rasterizeToJpgs(
-        cachedBytes,
-        pageCount: pack.sheetsNeeded,
-      );
-      var lastPct = -1;
-      await OrderRepository.instance.uploadSheets(
-        orderId: orderId,
-        sheetJpgs: jpgs,
-        onProgress: (done, total) {
-          final pct = total > 0 ? (done * 100 ~/ total) : 100;
-          if (pct != lastPct) {
-            lastPct = pct;
-            _setStage('Uploading sheets…  $pct%');
-          }
+    // 2. Render the cropped photos + upload them to the backend. The local
+    //    OrdersStore record is written only once the backend has FILED the
+    //    photos, so a refused payment never shows up as a "received" order.
+    await _uploadToBackend();
+  }
+
+  /// Renders (once, cached) and uploads the cropped photos for the already
+  /// created order. Safe to call again after a failure: same orderId, same
+  /// token, same JPEGs — only the upload is repeated.
+  Future<void> _uploadToBackend() async {
+    final orderId = _placedOrderId;
+    final token = _placedToken;
+    if (orderId == null || token == null) return;
+
+    final cart = context.read<Cart>();
+    final pack = cart.selectedPack;
+    try {
+      if (_renderedJpgs == null) {
+        if (pack == null || cart.isEmpty) {
+          throw const PhotoExportException(
+              'Your photos are no longer in the cart on this device.');
+        }
+        final total = cart.itemCount;
+        _setStage('Preparing photo 1 of $total…');
+        final jpgs = await renderCroppedJpegs(
+          cart,
+          onProgress: (done, t) {
+            if (done < t) _setStage('Preparing photo ${done + 1} of $t…');
+          },
+        );
+        if (!mounted) return;
+        _renderedJpgs = jpgs;
+      }
+      final jpgs = _renderedJpgs!;
+      final mb = jpgs.fold<int>(0, (s, b) => s + b.length) / (1024 * 1024);
+      _setStage(
+          'Uploading ${jpgs.length} photo${jpgs.length == 1 ? '' : 's'} '
+          '(${mb.toStringAsFixed(1)} MB)…');
+
+      // Remember that THIS token has been sent once: if the answer is lost
+      // and the retry gets 409, that is "already filed", not "used elsewhere".
+      final attemptedBefore = _ingestAttempted;
+      _ingestAttempted = true;
+      await _persistPending();
+      if (!mounted) return;
+
+      final paise = _authoritativePaise;
+      final res = await BackendApi.ingest(
+        order: <String, dynamic>{
+          'orderNumber': _placedOrderNumber ?? '',
+          'category': pack?.size.category.slug ?? '',
+          'size': pack?.size.label ?? '',
+          // The server's price table is authoritative; these are the pack
+          // this order claims to be, so it can tie the paid amount to it.
+          'snapCount': pack?.snapCount ?? 0,
+          if (paise != null) 'amountRupees': paise / 100.0,
+          'placedAt': _placedAtIso ?? DateTime.now().toUtc().toIso8601String(),
         },
+        token: token,
+        photosJpg: jpgs,
       );
-    }
+      if (!mounted) return;
 
-    // 3. Keep the local record + go to the confirmation.
-    final order = OrderRecord(
-      id: orderId,
-      placedAt: DateTime.now(),
-      customerName: cart.customerName.isEmpty ? 'Customer' : cart.customerName,
-      customerPhone: cart.customerPhone.isEmpty ? '—' : '+91 ${cart.customerPhone}',
-      address: cart.fullAddress.isEmpty ? '—' : cart.fullAddress,
-      productTitle: pack.size.category.title,
-      sizeLabel: pack.size.label,
-      sizeDimensions: pack.size.dimensions,
-      snapCount: pack.snapCount,
-      sheetsNeeded: pack.sheetsNeeded,
-      totalPaise: _authoritativePaise ?? cart.totalPaise,
-      photoPaths: cart.items.map((i) => i.localPath).toList(),
-      status: OrderStatus.received,
-      pdfStatus:
-          cachedBytes != null ? SheetPdfStatus.ready : SheetPdfStatus.generating,
-      pdfBytes: cachedBytes,
-    );
-    orders.place(order);
-    if (cachedBytes == null) {
-      _buildSheetsForOrder(orders, order, pack.size);
-    }
+      if (res.ok) {
+        // Includes duplicate:true — the server had already filed this order.
+        await _finishFiled(orderId,
+            note: res.duplicate ? 'duplicate: filed on an earlier attempt' : null);
+        return;
+      }
 
+      if (res.status == 409) {
+        // The UTR is in the server ledger. For THIS order number that means a
+        // retry after a lost response — the photos are filed. Only a
+        // DIFFERENT order number is a real "used for another order".
+        final sameOrder = (res.orderNumber != null &&
+                res.orderNumber == _placedOrderNumber) ||
+            (res.orderNumber == null && attemptedBefore);
+        if (sameOrder) {
+          await _finishFiled(orderId,
+              note: '409 after retry — filed on an earlier attempt');
+          return;
+        }
+        await _reject(orderId, '${res.status}: ${res.error ?? ''}',
+            'This payment (UTR) was already used for another order'
+            '${res.orderNumber == null ? '' : ' (#${res.orderNumber})'}, so '
+            'the photos were not sent. Order #${_placedOrderNumber ?? ''} is '
+            'saved — please contact us before paying again.');
+        return;
+      }
+
+      if (res.status == 402) {
+        if (res.error == 'token_expired') {
+          // Authentic but stale pass: the UTR is NOT burnt (the ledger is
+          // written only on a successful filing), so the same screenshot
+          // re-verifies. Keep the order; ask for a re-attach, no new order.
+          await _safeMark(orderId, 'upload_failed',
+              error: '402: payment token expired — re-attach');
+          _placedToken = null;
+          _needsFreshToken = true;
+          await _persistPending();
+          if (!mounted) return;
+          setState(() {
+            _busy = false;
+            _stage = '';
+            _uploadFailed = true;
+            _error = 'Your upload pass expired. Tap below and re-attach the '
+                'same payment screenshot — your order '
+                '#${_placedOrderNumber ?? ''} is kept.';
+          });
+          return;
+        }
+        // Forged / missing token, or the paid amount does not cover this pack.
+        await _reject(orderId, '${res.status}: ${res.error ?? ''}',
+            'The server could not confirm this payment, so the photos were '
+            'not sent. Order #${_placedOrderNumber ?? ''} is saved — please '
+            'contact us; do not pay again.');
+        return;
+      }
+
+      throw _IngestFailure(res.status, res.error);
+    } catch (e) {
+      debugPrint('[Checkout] upload failed: $e');
+      await _safeMark(orderId, 'upload_failed', error: '$e');
+      if (!mounted) return;
+      final reason = e is PhotoExportException
+          ? e.message
+          : e is _IngestFailure
+              ? e.message
+              : 'Check your internet connection.';
+      setState(() {
+        _busy = false;
+        _stage = '';
+        _uploadFailed = true;
+        _error = 'Your payment is confirmed and order '
+            '#${_placedOrderNumber ?? ''} is placed, but your photos could not '
+            'be sent yet. $reason Tap Retry upload to send them again.';
+      });
+    }
+  }
+
+  /// The backend has the photos: record the order locally, drop the resume
+  /// record, clear the cart and show the order-placed screen.
+  Future<void> _finishFiled(String orderId, {String? note}) async {
+    _setStage('Done!');
+    await _safeMark(orderId, 'filed', error: note);
     if (!mounted) return;
+    final cart = context.read<Cart>();
+    final orders = context.read<OrdersStore>();
+    final pack = cart.selectedPack;
+    if (pack != null && orders.findById(orderId) == null) {
+      orders.place(OrderRecord(
+        id: orderId,
+        placedAt: DateTime.tryParse(_placedAtIso ?? '')?.toLocal() ??
+            DateTime.now(),
+        customerName:
+            cart.customerName.isEmpty ? 'Customer' : cart.customerName,
+        customerPhone:
+            cart.customerPhone.isEmpty ? '—' : '+91 ${cart.customerPhone}',
+        address: cart.fullAddress.isEmpty ? '—' : cart.fullAddress,
+        productTitle: pack.size.category.title,
+        sizeLabel: pack.size.label,
+        sizeDimensions: pack.size.dimensions,
+        snapCount: pack.snapCount,
+        sheetsNeeded: pack.sheetsNeeded,
+        totalPaise: _authoritativePaise ?? pack.priceInPaise,
+        photoPaths: cart.items.map((i) => i.localPath).toList(),
+        status: OrderStatus.received,
+        // No sheet PDF any more — photos are filed by the backend.
+        pdfStatus: SheetPdfStatus.archived,
+      ));
+    }
+    await PendingUpload.clear();
+    if (!mounted) return;
+    _renderedJpgs = null;
     cart.clear();
     context.go('/order-placed', extra: orderId);
   }
 
-  static Future<void> _buildSheetsForOrder(
-      OrdersStore store, OrderRecord order, dynamic size) async {
+  /// A real refusal (UTR used by another order, forged token, amount short):
+  /// the order doc is marked, never retried, and never shown as placed.
+  Future<void> _reject(String orderId, String backendError, String msg) async {
+    await _safeMark(orderId, 'rejected', error: backendError);
+    await PendingUpload.clear();
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _stage = '';
+      _rejected = true;
+      _uploadFailed = false;
+      _needsFreshToken = false;
+      _error = msg;
+    });
+  }
+
+  /// markBackend must never turn a finished upload into a visible failure.
+  Future<void> _safeMark(String orderId, String status,
+      {String? error}) async {
     try {
-      final bytes = await SheetPdfService.buildBytes(order: order, size: size);
-      store.setPdf(order.id, bytes);
+      await OrderRepository.instance
+          .markBackend(orderId, status, error: error);
     } catch (e) {
-      debugPrint('[Checkout] background PDF build failed: $e');
-      store.markPdfFailed(order.id);
+      debugPrint('[Checkout] markBackend($status) failed: $e');
     }
   }
 
@@ -301,133 +620,218 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   Widget build(BuildContext context) {
     final cart = context.watch<Cart>();
-    final paise = _authoritativePaise ?? cart.totalPaise;
-    final rupees = paise / 100.0;
-    final amountLabel = cart.paiseToRupees(paise);
-    final priceLoading = _authoritativePaise == null;
+    final paise = _authoritativePaise;
+    final amountLabel = paise == null ? '…' : cart.paiseToRupees(paise);
+    final priceLoading = paise == null && !_priceError;
+    final retryMode = _placedOrderId != null &&
+        _placedToken != null &&
+        _uploadFailed &&
+        !_rejected;
+    final reattachMode =
+        _placedOrderId != null && _needsFreshToken && !_rejected;
+    final canPay = retryMode || (paise != null && !_busy);
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Pay & place order')),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    const Text('Amount to pay',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600)),
-                    Text(amountLabel,
-                        style: const TextStyle(
-                            fontSize: 20, fontWeight: FontWeight.w800)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 20),
-            if (!UpiQr.configured)
-              _SetupPending()
-            else ...[
-              Center(
-                child: Column(
-                  children: [
-                    const Text('Scan & pay with any UPI app',
-                        style: TextStyle(
-                            fontSize: 14, fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 4),
-                    const Text('GPay · PhonePe · Paytm · BHIM',
-                        style: TextStyle(
-                            fontSize: 12, color: AppColors.textSecondary)),
-                    const SizedBox(height: 14),
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(
-                            color: AppColors.textSecondary
-                                .withValues(alpha: 0.2)),
-                      ),
-                      child: priceLoading
-                          ? const SizedBox(
-                              width: 230,
-                              height: 230,
-                              child: Center(child: CircularProgressIndicator()),
-                            )
-                          : QrImageView(
-                              data: UpiQr.withAmount(rupees),
-                              size: 230,
-                              backgroundColor: Colors.white,
-                            ),
-                    ),
-                    const SizedBox(height: 10),
-                    Text('Pay exactly $amountLabel to ${UpiQr.merchantName}',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            fontSize: 13, color: AppColors.textSecondary)),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 24),
-              _Steps(amountLabel: amountLabel),
-              const SizedBox(height: 24),
-              if (_busy && _stage.isNotEmpty) ...[
-                const Center(child: CircularProgressIndicator()),
-                const SizedBox(height: 10),
-                Center(
-                  child: Text(_stage,
-                      style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textSecondary)),
-                ),
-              ] else ...[
-                PrimaryButton(
-                  label: priceLoading
-                      ? 'Loading…'
-                      : 'I\'ve paid — attach screenshot',
-                  icon: Icons.verified_rounded,
-                  onPressed: priceLoading ? null : _attachAndVerify,
-                ),
-                if (_error != null) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFDECEA),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.info_outline,
-                            color: Color(0xFFC0392B), size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(_error!,
-                              style: const TextStyle(
-                                  fontSize: 13, color: Color(0xFFC0392B))),
-                        ),
-                      ],
-                    ),
+    return PopScope(
+      // Never leave while an order is being created / sent: the resume state
+      // would otherwise be abandoned mid-flight. Leaving in retry mode is
+      // fine — the pending record brings the order back on return.
+      canPop: !_busy,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          _showSnack('Please wait — your order is being sent.');
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Pay & place order')),
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Amount to pay',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w600)),
+                      Text(amountLabel,
+                          style: const TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.w800)),
+                    ],
                   ),
-                ],
-              ],
-              const SizedBox(height: 14),
-              const Center(
-                child: Text(
-                  '🔒 We read your screenshot only to confirm the amount.',
-                  style:
-                      TextStyle(fontSize: 11, color: AppColors.textSecondary),
                 ),
               ),
+              if (_priceError && paise == null) ...[
+                const SizedBox(height: 12),
+                _PriceError(onRetry: _loadPrice),
+              ],
+              const SizedBox(height: 20),
+              if (!UpiQr.configured)
+                _SetupPending()
+              else ...[
+                Center(
+                  child: Column(
+                    children: [
+                      const Text('Scan & pay with any UPI app',
+                          style: TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 4),
+                      const Text('GPay · PhonePe · Paytm · BHIM',
+                          style: TextStyle(
+                              fontSize: 12, color: AppColors.textSecondary)),
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                              color: AppColors.textSecondary
+                                  .withValues(alpha: 0.2)),
+                        ),
+                        child: paise == null
+                            ? SizedBox(
+                                width: 230,
+                                height: 230,
+                                child: Center(
+                                  child: priceLoading
+                                      ? const CircularProgressIndicator()
+                                      : const Icon(Icons.qr_code_2_rounded,
+                                          size: 72,
+                                          color: AppColors.textSecondary),
+                                ),
+                              )
+                            : QrImageView(
+                                data: UpiQr.withAmount(paise / 100.0),
+                                size: 230,
+                                backgroundColor: Colors.white,
+                              ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                          paise == null
+                              ? 'The QR appears once the price has loaded.'
+                              : 'Pay exactly $amountLabel to ${UpiQr.merchantName}',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              fontSize: 13, color: AppColors.textSecondary)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _Steps(amountLabel: amountLabel),
+                const SizedBox(height: 24),
+                if (_busy && _stage.isNotEmpty) ...[
+                  const Center(child: CircularProgressIndicator()),
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Text(_stage,
+                        style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textSecondary)),
+                  ),
+                ] else ...[
+                  if (!_rejected)
+                    PrimaryButton(
+                      label: retryMode
+                          ? 'Retry upload'
+                          : reattachMode
+                              ? 'Re-attach screenshot'
+                              : priceLoading
+                                  ? 'Loading…'
+                                  : 'I\'ve paid — attach screenshot',
+                      icon: retryMode
+                          ? Icons.cloud_upload_rounded
+                          : Icons.verified_rounded,
+                      onPressed: canPay ? _attachAndVerify : null,
+                    ),
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFDECEA),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.info_outline,
+                              color: Color(0xFFC0392B), size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(_error!,
+                                style: const TextStyle(
+                                    fontSize: 13, color: Color(0xFFC0392B))),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+                const SizedBox(height: 14),
+                const Center(
+                  child: Text(
+                    '🔒 We read your screenshot only to confirm the amount.',
+                    style:
+                        TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
+      ),
+    );
+  }
+}
+
+/// A non-2xx /ingest response other than a handled 402/409 (retryable).
+class _IngestFailure implements Exception {
+  const _IngestFailure(this.status, this.error);
+  final int status;
+  final String? error;
+
+  String get message {
+    if (status == 413) {
+      return 'The photos are too large for the server in one go.';
+    }
+    if (status == 0) return 'Check your internet connection.';
+    return 'The server replied $status${error == null ? '' : ' ($error)'}.';
+  }
+
+  @override
+  String toString() => 'ingest $status: ${error ?? ''}';
+}
+
+class _PriceError extends StatelessWidget {
+  const _PriceError({required this.onRetry});
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFDECEA),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.wifi_off_rounded,
+              color: Color(0xFFC0392B), size: 18),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              'Could not load the price. Check your internet and tap Retry.',
+              style: TextStyle(fontSize: 13, color: Color(0xFFC0392B)),
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
       ),
     );
   }
