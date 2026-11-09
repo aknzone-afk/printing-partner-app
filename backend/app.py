@@ -56,12 +56,50 @@ PAYMENT_SECRET = os.environ.get("PAYMENT_SECRET", "").encode() or secrets.token_
 API_TOKEN = os.environ.get("API_TOKEN", "").strip()
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "").strip()
 AMOUNT_TOLERANCE = 1.0            # ±₹1
-TOKEN_TTL = 30 * 60              # payment token valid 30 min (pay -> place order)
+TOKEN_TTL = 24 * 3600            # token valid 24 h (a resumed upload must not die);
+                                 # safe because the UTR inside it is single-use.
+GLOBAL_MIN_RUPEES = 150.0        # cheapest pack in the catalog — absolute floor
 MAX_PHOTO_BYTES = 12 * 1024 * 1024
 MAX_PHOTOS = 200
 
 filer = LocalFiler()
 app = Flask(__name__)
+
+# ------------------------------------------------------------ price catalog
+# The phone states the amount to /verify-payment, so a dishonest client could
+# pay ₹10 for a ₹300 pack. The token therefore carries the amount Gemini saw,
+# and /ingest insists it covers the cheapest pack of that category+size that
+# holds the photos uploaded. catalog.json mirrors print_packages.dart.
+_CATALOG: list[dict] = []
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog.json"),
+              encoding="utf-8") as _f:
+        _CATALOG = json.load(_f).get("packs", [])
+except Exception as _e:  # pragma: no cover
+    print("WARN catalog.json not loaded:", _e)
+
+_CAT_ALIASES = {"photo": "photos", "photos": "photos", "polaroid": "polaroid",
+                "snapbook": "snapbook"}
+
+
+def _norm(s: str) -> str:
+    return " ".join(str(s or "").lower().replace("×", "x").replace("inches", "").split())
+
+
+def min_price_for(category: str, size: str, n_photos: int):
+    """Cheapest catalog price (rupees) that covers n_photos for this
+    category+size; None when the size can't be resolved."""
+    cat = _CAT_ALIASES.get(_norm(category), None)
+    sz = _norm(size)
+    if cat is None or not sz:
+        return None
+    cands = [p for p in _CATALOG if p["category"] == cat and
+             (_norm(p["size"]) == sz or _norm(p["dimensions"]) == sz)]
+    if not cands:
+        return None
+    fits = [p for p in cands if int(p["count"]) >= n_photos] or \
+           [max(cands, key=lambda p: int(p["count"]))]
+    return float(min(p["rupees"] for p in fits))
 
 # ---------------------------------------------------------------- Gemini (lazy)
 _model = None
@@ -257,6 +295,20 @@ def ingest():
         return jsonify(ok=False, error="no photos"), 400
     if len(files) > MAX_PHOTOS:
         return jsonify(ok=False, error="too many photos"), 413
+
+    # Price floor: the paid amount (inside the signed token) must cover the
+    # pack this order needs. Unknown size -> at least the cheapest pack.
+    if enforce and payload:
+        paid = float(payload.get("amount") or 0)
+        need = min_price_for(str(meta.get("category") or ""),
+                             str(meta.get("size") or ""), len(files))
+        floor = need if need is not None else GLOBAL_MIN_RUPEES
+        if paid + AMOUNT_TOLERANCE < floor:
+            app.logger.warning("ingest underpaid: paid %.2f < floor %.2f (%s/%s x%d)",
+                               paid, floor, meta.get("category"), meta.get("size"), len(files))
+            return jsonify(ok=False, error="underpaid",
+                           reason=f"Paid ₹{paid:.0f} but this pack costs "
+                                  f"₹{floor:.0f}. Please pay the full amount."), 402
     photos: list[bytes] = []
     for f in files:
         b = f.read(MAX_PHOTO_BYTES + 1)
