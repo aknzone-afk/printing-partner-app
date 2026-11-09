@@ -98,7 +98,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
-    final rupees = (_authoritativePaise ?? context.read<Cart>().totalPaise) / 100.0;
+    // Claim the flow SYNCHRONOUSLY before the async gallery pick, so a fast
+    // double-tap can't start two orders (NEVER-duplicate-orders rule).
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+
+    final rupees =
+        (_authoritativePaise ?? context.read<Cart>().totalPaise) / 100.0;
 
     // 1. Pick the payment screenshot.
     final XFile? picked;
@@ -106,16 +114,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       picked = await ImagePicker()
           .pickImage(source: ImageSource.gallery, imageQuality: 90);
     } catch (e) {
+      if (mounted) setState(() => _busy = false);
       _showSnack('Could not open your gallery: $e');
       return;
     }
-    if (picked == null) return; // cancelled
+    if (picked == null) {
+      if (mounted) setState(() => _busy = false);
+      return; // cancelled
+    }
 
-    setState(() {
-      _busy = true;
-      _error = null;
-      _stage = 'Reading your payment…';
-    });
+    if (!mounted) return;
+    setState(() => _stage = 'Reading your payment…');
 
     try {
       // 2. Compress to JPEG for Gemini.
@@ -138,6 +147,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       );
 
       if (!check.verified) {
+        if (!mounted) return;
         setState(() {
           _busy = false;
           _stage = '';
@@ -192,6 +202,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       _setStage('Placing order…');
       final uid = await AuthService.instance.ensureSignedIn();
       if (uid == null) {
+        if (!mounted) return;
         setState(() {
           _busy = false;
           _stage = '';
@@ -341,11 +352,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                             color: AppColors.textSecondary
                                 .withValues(alpha: 0.2)),
                       ),
-                      child: QrImageView(
-                        data: UpiQr.withAmount(rupees),
-                        size: 230,
-                        backgroundColor: Colors.white,
-                      ),
+                      child: priceLoading
+                          ? const SizedBox(
+                              width: 230,
+                              height: 230,
+                              child: Center(child: CircularProgressIndicator()),
+                            )
+                          : QrImageView(
+                              data: UpiQr.withAmount(rupees),
+                              size: 230,
+                              backgroundColor: Colors.white,
+                            ),
                     ),
                     const SizedBox(height: 10),
                     Text('Pay exactly $amountLabel to ${UpiQr.merchantName}',

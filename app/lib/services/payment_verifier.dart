@@ -56,7 +56,7 @@ Rules:
           TextPart(_prompt),
           InlineDataPart('image/jpeg', screenshotJpg),
         ]),
-      ]);
+      ]).timeout(const Duration(seconds: 30)); // never hang the money path
       final map = jsonDecode(_extractJson((res.text ?? '').trim()))
           as Map<String, dynamic>;
 
@@ -143,19 +143,17 @@ Rules:
   ({bool ok, bool known}) _payeeMatches(
       String vpa, String name, String? ourUpi, String? ourName) {
     String n(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9@._]'), '');
-    final v = n(vpa), nm = n(name);
+    final v = n(vpa);
     final ou = ourUpi == null ? '' : n(ourUpi);
-    final on = ourName == null ? '' : n(ourName);
-    if ((ou.isEmpty && on.isEmpty) || (v.isEmpty && nm.isEmpty)) {
-      return (ok: true, known: false); // nothing to compare
+    // Hard match/mismatch ONLY on the VPA (unambiguous). UPI apps routinely
+    // shorten / reorder / drop middle names on the receipt, so a name mismatch
+    // must NOT hard-reject a genuine payment — the shop's bank reconciliation
+    // is the real gate. When the VPA isn't shown, treat payee as unknown (soft).
+    if (ou.isNotEmpty && v.isNotEmpty) {
+      final ok = v == ou || v.contains(ou) || ou.contains(v);
+      return (ok: ok, known: true);
     }
-    if (ou.isNotEmpty && v.isNotEmpty && (v == ou || v.contains(ou) || ou.contains(v))) {
-      return (ok: true, known: true);
-    }
-    if (on.isNotEmpty && nm.isNotEmpty && (nm.contains(on) || on.contains(nm))) {
-      return (ok: true, known: true);
-    }
-    return (ok: false, known: true);
+    return (ok: true, known: false);
   }
 
   String _extractJson(String s) {
