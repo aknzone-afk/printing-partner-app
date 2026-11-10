@@ -31,7 +31,6 @@ class _AddressScreenState extends State<AddressScreen> {
   Timer? _debounce;
   bool _pincodeLoading = false;
   bool _pincodeOk = false;
-  String? _pincodeError;
 
   @override
   void initState() {
@@ -51,10 +50,7 @@ class _AddressScreenState extends State<AddressScreen> {
 
   void _onPincodeChanged() {
     final value = _pincode.text;
-    setState(() {
-      _pincodeOk = false;
-      _pincodeError = null;
-    });
+    setState(() => _pincodeOk = false);
     if (value.length != 6) {
       _city.clear();
       _state.clear();
@@ -67,10 +63,7 @@ class _AddressScreenState extends State<AddressScreen> {
   }
 
   Future<void> _lookupPincode(String pin) async {
-    setState(() {
-      _pincodeLoading = true;
-      _pincodeError = null;
-    });
+    setState(() => _pincodeLoading = true);
     // worldpostallocations.com — valid HTTPS, covers all Indian pincodes.
     // (The earlier `api.postalpincode.in` endpoint went down with an
     // expired/mismatched SSL cert.)
@@ -204,10 +197,10 @@ class _AddressScreenState extends State<AddressScreen> {
                         ? const Icon(Icons.check_circle,
                             color: AppColors.success, size: 20)
                         : null),
-                // Show the lookup status under the field but don't block
-                // submit on it — city/state validators handle that. The user
-                // can fill city/state manually if the API is unreachable.
-                errorText: _pincodeError,
+                // The pincode NEVER shows a red lookup error. City/State are
+                // auto-filled when the lookup succeeds and stay optional
+                // otherwise — the shop fills them from the pincode. The only
+                // check is that the pincode is 6 digits, and only on Continue.
                 validator: (v) {
                   if (v == null || v.length != 6) return '6-digit pincode';
                   return null;
@@ -282,7 +275,6 @@ class _Field extends StatelessWidget {
     this.hintText,
     this.suffix,
     this.prefix,
-    this.errorText,
     this.textCapitalization = TextCapitalization.none,
   });
 
@@ -296,7 +288,6 @@ class _Field extends StatelessWidget {
   final String? hintText;
   final Widget? suffix;
   final Widget? prefix;
-  final String? errorText;
   final TextCapitalization textCapitalization;
 
   @override
@@ -328,7 +319,6 @@ class _Field extends StatelessWidget {
                 ),
           prefixIconConstraints:
               const BoxConstraints(minWidth: 0, minHeight: 0),
-          errorText: errorText,
         ),
       ),
     );
