@@ -506,6 +506,57 @@ def notify_telegram(text: str) -> None:
         app.logger.warning("telegram notify failed: %s", e)
 
 
+def build_order_pdf(photos, caps=(2000, 1400, 1000), quality=85):
+    """One photo per page as a single PDF, downscaled so the whole file fits
+    Telegram's ~50MB bot limit. Full-resolution photos stay on disk / the
+    dashboard; this PDF is the shop's quick printable copy. None on failure."""
+    if not photos:
+        return None
+    try:
+        import io
+        from PIL import Image
+        data = None
+        for cap in caps:
+            imgs = []
+            for b in photos:
+                try:
+                    im = Image.open(io.BytesIO(b)).convert("RGB")
+                    im.thumbnail((cap, cap))
+                    imgs.append(im)
+                except Exception:
+                    continue
+            if not imgs:
+                return None
+            buf = io.BytesIO()
+            imgs[0].save(buf, format="PDF", save_all=True,
+                         append_images=imgs[1:], quality=quality, resolution=200.0)
+            data = buf.getvalue()
+            if len(data) <= 45 * 1024 * 1024:
+                return data
+        return data   # smallest attempt, even if still large
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("order pdf build failed: %s", e)
+        return None
+
+
+def send_telegram_document(data, filename, caption=""):
+    """Best-effort: post a file (the order PDF) to the shop group. Never raises."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat or not data:
+        return
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            data={"chat_id": chat, "caption": caption[:1000], "parse_mode": "HTML"},
+            files={"document": (filename, data, "application/pdf")},
+            timeout=90,
+        )
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("telegram document failed: %s", e)
+
+
 @app.post("/ingest")
 def ingest():
     """Files one order's INDIVIDUAL cropped photos to the VM disk tree.
@@ -718,6 +769,14 @@ def ingest():
         if addr:
             lines.append(f"📍 {escape(addr[:250])}")
         notify_telegram("\n".join(lines))
+        # ...then the printable PDF of all the order's photos, right below it.
+        pdf = build_order_pdf(photos)
+        if pdf:
+            send_telegram_document(
+                pdf,
+                f"Order {order_number or file_number}.pdf",
+                f"🖨 Order #{escape(order_number or file_number)} — all {len(written)} photos (print-ready)",
+            )
     except Exception as _e:   # pragma: no cover
         app.logger.warning("telegram order notify failed: %s", _e)
     return jsonify(ok=True, filed=len(written))
