@@ -18,7 +18,12 @@ Endpoints
                                (402 amount_mismatch), more photos than the pack
                                (400) and a REUSED UTR (409, one payment, one order).
                                A retry of the SAME order after a lost response
-                               answers 200 {duplicate:true} instead of 409.
+                               answers 200 {duplicate:true} instead of 409 (also
+                               when the token has expired meanwhile). An order
+                               number whose photos belong to ANOTHER payment is
+                               refused (400 order_number_taken) instead of being
+                               overwritten; an empty photo is 400 empty_photo; a
+                               body beyond the biggest pack x 12 MB is 413.
   POST /chat                   order facts + question -> Gemini order assistant.
   GET  /  /dashboard           merchant browse + per-order ZIP download (password).
 
@@ -35,6 +40,7 @@ Secrets (env, see env.example)
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -45,10 +51,17 @@ import secrets
 import time
 import zipfile
 from datetime import timezone
+from html import escape
+from urllib.parse import quote
 
 from flask import Flask, request, jsonify, Response, abort
 
 from filer import LocalFiler
+
+try:
+    import fcntl  # POSIX only (the VM); absent on a Windows dev box
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 try:
     from zoneinfo import ZoneInfo
@@ -66,6 +79,11 @@ TOKEN_TTL = 24 * 3600            # token valid 24 h (a resumed upload must not d
 GLOBAL_MIN_RUPEES = 150.0        # cheapest pack in the catalog — absolute floor
 MAX_PHOTO_BYTES = 12 * 1024 * 1024
 MAX_PHOTOS = 200
+# placedAt comes from the PHONE's clock. Outside this window (wrong phone date)
+# the order is filed under the server's own date, never in a folder the
+# merchant would not open ("1-1-1", next year…).
+PLACED_MAX_AGE = 45 * 24 * 3600
+PLACED_MAX_AHEAD = 24 * 3600
 
 filer = LocalFiler()
 app = Flask(__name__)
@@ -86,6 +104,23 @@ except Exception as _e:  # pragma: no cover
 _CAT_ALIASES = {"photo": "photos", "photos": "photos", "polaroid": "polaroid",
                 "snapbook": "snapbook"}
 
+# Whole-request cap. Without it the body was unbounded: anyone holding the app
+# token could park gigabytes in the VM's temp dir before the first check ran
+# (tester 10-Nov). The largest honest request is the biggest catalog pack with
+# every photo at the per-photo cap; Werkzeug answers 413 beyond that, straight
+# from the Content-Length header.
+_BIGGEST_PACK = max([int(p["count"]) for p in _CATALOG] or [54])
+app.config["MAX_CONTENT_LENGTH"] = _BIGGEST_PACK * MAX_PHOTO_BYTES + 1024 * 1024
+
+
+def _cap_body(limit: int) -> None:
+    """Tighter per-endpoint request cap (Flask >= 3.1; an older Flask keeps the
+    global cap above)."""
+    try:
+        request.max_content_length = limit
+    except AttributeError:  # pragma: no cover
+        pass
+
 
 def _norm(s: str) -> str:
     return " ".join(str(s or "").lower().replace("×", "x").replace("inches", "").split())
@@ -105,6 +140,33 @@ def min_price_for(category: str, size: str, n_photos: int):
     fits = [p for p in cands if int(p["count"]) >= n_photos] or \
            [max(cands, key=lambda p: int(p["count"]))]
     return float(min(p["rupees"] for p in fits))
+
+
+def max_count_for(category: str, size: str):
+    """Photo count of the BIGGEST catalog pack of this category+size; None when
+    the category/size is not in the catalog."""
+    cat = _CAT_ALIASES.get(_norm(category), None)
+    sz = _norm(size)
+    if cat is None or not sz:
+        return None
+    counts = [int(p["count"]) for p in _CATALOG if p["category"] == cat and
+              (_norm(p["size"]) == sz or _norm(p["dimensions"]) == sz)]
+    return max(counts) if counts else None
+
+
+def canonical_size(category: str, size: str):
+    """The catalog's own spelling of this size ("REGULAR", "4 x 6", "4 × 6 inches"
+    -> "Regular"); None when it is not in the catalog. The price table accepts
+    all of those spellings, so the FOLDER must not depend on which one the
+    client happened to send (tester 10-Nov: one size ended up in three folders)."""
+    cat = _CAT_ALIASES.get(_norm(category), None)
+    sz = _norm(size)
+    if cat is None or not sz:
+        return None
+    for p in _CATALOG:
+        if p["category"] == cat and (_norm(p["size"]) == sz or _norm(p["dimensions"]) == sz):
+            return str(p["size"])
+    return None
 
 
 def price_for(category: str, size: str, snap_count: int):
@@ -186,8 +248,77 @@ def _ledger_find(utr: str):
 
 
 def _ledger_append(rec: dict) -> None:
+    # Pure-ASCII JSON (\uXXXX escapes): this write must never fail on what the
+    # client put in the order number. With ensure_ascii=False a lone surrogate
+    # ("\ud800") raised UnicodeEncodeError AFTER the photos were filed, so the
+    # UTR never reached the ledger and one payment filed order after order
+    # (tester 10-Nov).
     with open(_ledger_path(), "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.write(json.dumps(rec) + "\n")
+
+
+def _ledger_name_clash(folder: str, names: list[str], utr: str):
+    """The ledger row of ANOTHER payment that already owns one of these file
+    names in this folder, or None.
+
+    Photos are published with os.replace, so a second paid order sending an
+    order number that is already on file (order numbers are sequential, hence
+    guessable) silently replaced the first customer's photos (tester 10-Nov).
+    Ownership comes from the ledger, not from the disk: files left by a
+    crashed half-filing have no ledger row and stay re-uploadable."""
+    path = _ledger_path()
+    if not os.path.exists(path):
+        return None
+    mine = set(names)
+    key = (utr or "").strip().lower()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+                if rec.get("folder") != folder:
+                    continue
+                if str(rec.get("utr", "")).strip().lower() == key:
+                    continue
+                theirs = filer.order_names(str(rec.get("name") or ""),
+                                           int(rec.get("photos") or 0))
+                if mine.intersection(theirs):
+                    return rec
+            except Exception:
+                continue
+    return None
+
+
+@contextlib.contextmanager
+def _ledger_lock():
+    """Exclusive lock over "is this UTR in the ledger? -> file -> append".
+
+    gunicorn runs several workers; without it two simultaneous /ingest calls
+    carrying the SAME payment token both saw an empty ledger and both filed
+    (tester 10-Nov: one UTR paid for two different orders). flock is held on a
+    separate open file per request, so it serialises across worker PROCESSES
+    and across threads of one worker alike."""
+    if fcntl is None:  # pragma: no cover  (Windows dev box: single process)
+        yield
+        return
+    lock_path = os.path.join(os.path.dirname(_ledger_path()), "payments.lock")
+    with open(lock_path, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _utr_taken_response(prev: dict, order_number: str):
+    """Reply for a UTR that is already in the ledger."""
+    # Idempotent retry: the client timed out / lost the response after we had
+    # already filed THIS order. Never a second filing, never a false "used for
+    # another order" rejection.
+    if order_number and str(prev.get("orderNumber") or "") == order_number:
+        return jsonify(ok=True, filed=int(prev.get("photos") or 0),
+                       duplicate=True, orderNumber=order_number)
+    return jsonify(ok=False, error="utr_reused",
+                   orderNumber=str(prev.get("orderNumber") or "")), 409
 
 
 # --------------------------------------------------------------- payment token
@@ -223,9 +354,24 @@ def _need_api_token():
 
 
 # ----------------------------------------------------------------- endpoints
+def _sniff_mime(b: bytes) -> str:
+    """Gemini rejects application/octet-stream, and phones send screenshots in
+    several formats, so decide the type from the bytes, not the client header."""
+    if b[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if b[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if b[:4] == b"RIFF" and b[8:12] == b"WEBP":
+        return "image/webp"
+    if b[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypmsf1"):
+        return "image/heic"
+    return "image/jpeg"
+
+
 @app.get("/health")
 def health():
-    return jsonify(ok=True, ai=bool(GEMINI_API_KEY), ts=int(time.time()))
+    return jsonify(ok=True, ai=bool(GEMINI_API_KEY), catalog=len(_CATALOG),
+                   ts=int(time.time()))
 
 
 _PROMPT = (
@@ -242,25 +388,28 @@ _PROMPT = (
 @app.post("/verify-payment")
 def verify_payment():
     _need_api_token()
-    m = gemini()
-    if m is None:
-        return jsonify(verified=False, reason="Payment verification is being set up. "
-                       "Please try again shortly.", code="ai_unconfigured"), 503
+    _cap_body(MAX_PHOTO_BYTES + 1024 * 1024)   # one screenshot, nothing more
+    # Validate the request BEFORE the "AI not configured" answer, so a broken
+    # request is a 400 whether or not the Gemini key is set.
     try:
         expected = float(request.form.get("amount", "0"))
     except ValueError:
         return jsonify(verified=False, reason="Bad amount."), 400
     our_vpa = request.form.get("ourUpiId", "").strip()
     f = request.files.get("screenshot")
-    if not f or expected <= 0:
+    if not f or not (expected > 0):   # "not >" also refuses NaN
         return jsonify(verified=False, reason="Missing screenshot or amount."), 400
     img = f.read(MAX_PHOTO_BYTES + 1)
     if len(img) > MAX_PHOTO_BYTES:
         return jsonify(verified=False, reason="Screenshot too large."), 413
+    m = gemini()
+    if m is None:
+        return jsonify(verified=False, reason="Payment verification is being set up. "
+                       "Please try again shortly.", code="ai_unconfigured"), 503
 
     try:
         resp = m.generate_content(
-            [_PROMPT, {"mime_type": f.mimetype or "image/jpeg", "data": img}],
+            [_PROMPT, {"mime_type": _sniff_mime(img), "data": img}],
             request_options={"timeout": 30},
         )
         data = json.loads(_extract_json((resp.text or "").strip()))
@@ -289,9 +438,14 @@ def verify_payment():
         return jsonify(verified=False, reason="Couldn't read the amount. "
                        "Please attach a clearer screenshot.", utr=utr, payee=payee)
     if abs(amount - expected) > AMOUNT_TOLERANCE:
-        return jsonify(verified=False, amount=amount, utr=utr, payee=payee,
-                       reason=f"The screenshot shows ₹{amount:.0f} but your order is "
-                       f"₹{expected:.0f}. Please pay the exact amount.")
+        if amount > expected:
+            reason = (f"The screenshot shows ₹{amount:.0f} but your order is only "
+                      f"₹{expected:.0f}. Please contact the shop to adjust or refund "
+                      f"the extra ₹{amount - expected:.0f}.")
+        else:
+            reason = (f"The screenshot shows ₹{amount:.0f} but your order is "
+                      f"₹{expected:.0f}. Please pay the full amount.")
+        return jsonify(verified=False, amount=amount, utr=utr, payee=payee, reason=reason)
     # Hard-reject only on an unambiguous VPA mismatch (apps hide/trim names).
     if our_vpa and vpa:
         a = vpa.lower()
@@ -325,7 +479,10 @@ def ingest():
             raise ValueError("order must be an object")
     except Exception:
         return jsonify(ok=False, error="bad order json"), 400
-    order_number = str(meta.get("orderNumber") or "")
+    # A lone surrogate ("\ud800") is legal in JSON but cannot be written as
+    # UTF-8: replace it here, once, so the file name, the ledger row and the
+    # JSON answer all carry the same clean value. Blank ("   ") counts as none.
+    order_number = str(meta.get("orderNumber") or "").encode("utf-8", "replace").decode("utf-8").strip()
 
     token = request.form.get("token", "")
     payload = _check_token(token) if token else None
@@ -333,7 +490,15 @@ def ingest():
         # Authentic but stale -> the app re-verifies the SAME screenshot for the
         # SAME order (the UTR is not in the ledger yet). Forged/missing -> no
         # payment was ever verified.
-        if token and _check_token(token, allow_expired=True):
+        stale = _check_token(token, allow_expired=True) if token else None
+        if stale:
+            # ...unless this pass already filed its order: the answer was lost
+            # and the app retries only after 24 h. Saying "expired" then sends
+            # the customer to re-verify a UTR the ledger already holds ("already
+            # used") - a dead end for an order that IS filed (tester 10-Nov).
+            prev = _ledger_find(str(stale.get("utr") or ""))
+            if prev is not None:
+                return _utr_taken_response(prev, order_number)
             return jsonify(ok=False, error="token_expired",
                            reason="Your upload pass expired. Please re-attach "
                                   "the payment screenshot."), 402
@@ -341,16 +506,11 @@ def ingest():
                        reason="Payment not verified."), 402
     utr = (payload or {}).get("utr", "")
     if enforce and utr:
+        # Fast path (no lock): ledger rows are append-only, so a hit is final.
+        # A miss is re-checked under the lock right before filing.
         prev = _ledger_find(utr)
         if prev is not None:
-            # Idempotent retry: the client timed out / lost the response after
-            # we had already filed THIS order. Never a second filing, never a
-            # false "used for another order" rejection.
-            if order_number and str(prev.get("orderNumber") or "") == order_number:
-                return jsonify(ok=True, filed=int(prev.get("photos") or 0),
-                               duplicate=True, orderNumber=order_number)
-            return jsonify(ok=False, error="utr_reused",
-                           orderNumber=str(prev.get("orderNumber") or "")), 409
+            return _utr_taken_response(prev, order_number)
 
     files = request.files.getlist("photos")
     if not files:
@@ -362,7 +522,7 @@ def ingest():
     # tie the PAID amount to the exact (category, size, snapCount) price.
     try:
         snap_count = int(meta.get("snapCount") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # Overflow: 1e999 / Infinity
         snap_count = 0
     if snap_count > 0 and len(files) > snap_count:
         return jsonify(ok=False, error="too_many_photos",
@@ -379,58 +539,115 @@ def ingest():
         size = str(meta.get("size") or "")
         exact = price_for(category, size, snap_count) if snap_count > 0 else None
         if snap_count > 0 and exact is None:
-            app.logger.warning("ingest unknown pack %s/%s x%d", category, size, snap_count)
+            app.logger.warning("ingest unknown pack %.80r/%.80r x%d", category, size, snap_count)
             return jsonify(ok=False, error="unknown_pack",
                            reason="This print pack is not in the catalog."), 400
+        if exact is None:
+            # Legacy client (no snapCount). The price tie must still hold: the
+            # category+size has to be in the catalog and the photos have to fit
+            # its biggest pack — otherwise ₹150 filed ANY number of photos under
+            # ANY folder name (tester 10-Nov).
+            biggest = max_count_for(category, size)
+            if biggest is None:
+                app.logger.warning("ingest unknown pack %.80r/%.80r (no snapCount)", category, size)
+                return jsonify(ok=False, error="unknown_pack",
+                               reason="This print pack is not in the catalog."), 400
+            if len(files) > biggest:
+                return jsonify(ok=False, error="too_many_photos",
+                               reason=f"The biggest pack of this size holds {biggest} "
+                                      f"photos; {len(files)} were sent."), 400
         need = exact if exact is not None else min_price_for(category, size, len(files))
         floor = need if need is not None else GLOBAL_MIN_RUPEES
         if paid + AMOUNT_TOLERANCE < floor:
-            app.logger.warning("ingest amount mismatch: paid %.2f < price %.2f (%s/%s x%d, %d photos)",
+            app.logger.warning("ingest amount mismatch: paid %.2f < price %.2f (%.80r/%.80r x%d, %d photos)",
                                paid, floor, category, size, snap_count, len(files))
             return jsonify(ok=False, error="amount_mismatch",
                            reason=f"Paid ₹{paid:.0f} but this pack costs "
                                   f"₹{floor:.0f}. Please pay the full amount."), 402
-    photos: list[bytes] = []
+    # The photos stay in Werkzeug's spooled temp files and are COPIED to their
+    # place by the filer. They used to be read into one list first: an order of
+    # N photos held N x (up to 12 MB) of RAM at once - on a 1 GB VM a single
+    # big order (or one token replayed with an oversized last photo, which is
+    # refused only after the others were read) could exhaust it (tester 10-Nov).
+    photos = []
     for f in files:
-        b = f.read(MAX_PHOTO_BYTES + 1)
-        if len(b) > MAX_PHOTO_BYTES:
+        f.stream.seek(0, os.SEEK_END)
+        nbytes = f.stream.tell()
+        f.stream.seek(0)
+        if nbytes > MAX_PHOTO_BYTES:
             return jsonify(ok=False, error="photo too large"), 413
-        photos.append(b)
+        if nbytes == 0:
+            # Never file (and charge the payment for) a photo that is not there.
+            return jsonify(ok=False, error="empty_photo",
+                           reason="One of the photos arrived empty. Please try again."), 400
+        photos.append(f.stream)
 
-    when = datetime.datetime.now(IST)
+    now = datetime.datetime.now(IST)
+    when = now
     placed = meta.get("placedAt")
     if placed:
         try:
             dt = datetime.datetime.fromisoformat(str(placed).replace("Z", "+00:00"))
-            when = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST)
+            cand = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST)
+            if -PLACED_MAX_AGE <= (cand - now).total_seconds() <= PLACED_MAX_AHEAD:
+                when = cand
         except Exception:
             pass
-    try:
-        written = filer.file_order(
-            when=when,
-            category=str(meta.get("category") or "Other"),
-            size=str(meta.get("size") or "Unknown"),
-            order_number=order_number or str(int(time.time())),
-            photos=photos,
-        )
-    except Exception as e:
-        app.logger.error("ingest filing failed: %s", e)
-        return jsonify(ok=False, error="filing_failed"), 500
+    # Folder names come from the catalog, never from the client's spelling.
+    raw_category = str(meta.get("category") or "")
+    raw_size = str(meta.get("size") or "")
+    file_category = _CAT_ALIASES.get(_norm(raw_category)) or raw_category or "Other"
+    file_size = canonical_size(raw_category, raw_size) or raw_size or "Unknown"
+    file_number = order_number or str(int(time.time()))
+    folder = filer.order_folder(when, file_category, file_size)
+    stem = filer.order_stem(file_number)
+    # ONE critical section for "UTR still free? -> file -> ledger row". The
+    # request body is fully received by now, so the lock only covers local disk
+    # writes (milliseconds), never a slow phone upload.
+    with _ledger_lock():
+        if enforce and utr:
+            prev = _ledger_find(utr)
+            if prev is not None:
+                return _utr_taken_response(prev, order_number)
+        if payload:
+            clash = _ledger_name_clash(folder, filer.order_names(stem, len(photos)), utr)
+            if clash is not None:
+                # 400, not 409: the app reads 409 as "this UTR is in the ledger".
+                app.logger.warning("ingest order number %.80r already on file for another payment",
+                                   order_number)
+                return jsonify(ok=False, error="order_number_taken",
+                               reason="This order number already has photos on file."), 400
+        try:
+            written = filer.file_order(
+                when=when,
+                category=file_category,
+                size=file_size,
+                order_number=file_number,
+                photos=photos,
+            )
+        except Exception as e:
+            app.logger.error("ingest filing failed: %s", e)
+            return jsonify(ok=False, error="filing_failed"), 500
 
-    if payload:
-        _ledger_append({
-            "orderNumber": order_number,
-            "amount": payload.get("amount"),
-            "utr": utr,
-            "photos": len(written),
-            "at": datetime.datetime.now(IST).isoformat(timespec="seconds"),
-        })
+        if payload:
+            _ledger_append({
+                "orderNumber": order_number,
+                "amount": payload.get("amount"),
+                "utr": utr,
+                "photos": len(written),
+                "at": datetime.datetime.now(IST).isoformat(timespec="seconds"),
+                # where + under which name the photos went: lets the next order
+                # prove it is not about to replace them (_ledger_name_clash).
+                "folder": folder,
+                "name": stem,
+            })
     return jsonify(ok=True, filed=len(written))
 
 
 @app.post("/chat")
 def chat():
     _need_api_token()
+    _cap_body(1024 * 1024)   # get_json() reads the whole body into RAM
     m = gemini()
     if m is None:
         return jsonify(reply="The order assistant is being set up. Please try again "
@@ -463,10 +680,16 @@ def chat():
 
 
 # ------------------------------------------------------------------ dashboard
-def _safe_join(*parts) -> str:
-    root = os.path.realpath(filer.root)
-    p = os.path.realpath(os.path.join(root, *parts))
-    if p != root and not p.startswith(root + os.sep):
+def _orders_path(rel: str) -> str:
+    """Resolve a dashboard ?path= INSIDE the orders tree, or abort(400).
+    The base is "{DATA_ROOT}/Printing Partner", not DATA_ROOT itself: "?path=.."
+    used to reach the payments ledger next to it (tester 10-Nov)."""
+    base = os.path.realpath(os.path.join(filer.root, "Printing Partner"))
+    try:
+        p = os.path.realpath(os.path.join(base, rel or ""))
+    except ValueError:      # embedded NUL byte
+        abort(400)
+    if p != base and not p.startswith(base + os.sep):
         abort(400)
     return p
 
@@ -479,13 +702,16 @@ def _session_cookie() -> str:
 def _auth_ok() -> bool:
     if not DASHBOARD_PASSWORD:
         return False
-    return hmac.compare_digest(request.cookies.get("pps", ""), _session_cookie())
+    # bytes, not str: compare_digest raises TypeError on a non-ASCII str (-> 500).
+    return hmac.compare_digest(request.cookies.get("pps", "").encode("utf-8", "replace"),
+                               _session_cookie().encode())
 
 
 @app.post("/login")
 def login():
     given = request.form.get("pw", "")
-    if not DASHBOARD_PASSWORD or not hmac.compare_digest(given, DASHBOARD_PASSWORD):
+    if not DASHBOARD_PASSWORD or not hmac.compare_digest(
+            given.encode("utf-8", "replace"), DASHBOARD_PASSWORD.encode("utf-8")):
         time.sleep(1.5)  # slow brute force
         return Response("Wrong password. <a href='/'>Back</a>", status=403,
                         mimetype="text/html")
@@ -507,31 +733,31 @@ def dashboard():
             'style="width:100%;padding:10px;font-size:16px"/>'
             '<button style="margin-top:10px;padding:10px 16px;font-size:16px">Open</button>'
             '</form>', mimetype="text/html")
-    base = os.path.join(filer.root, "Printing Partner")
     rel = request.args.get("path", "")
-    here = _safe_join("Printing Partner", rel) if rel else (
-        base if os.path.isdir(base) else filer.root)
-    from urllib.parse import quote
+    here = _orders_path(rel)     # before any order exists: no folder -> "empty"
     rows = []
     if os.path.isdir(here):
         for name in sorted(os.listdir(here)):
             full = os.path.join(here, name)
             sub = f"{rel}/{name}".strip("/") if rel else name
             q = quote(sub)
+            # Every name / path shown is client-influenced (order number, the
+            # ?path= itself): escape it, never write it raw into the page.
+            shown = escape(name)
             if os.path.isdir(full):
                 n = len(os.listdir(full))
-                rows.append(f'<li>\U0001f4c1 <a href="/?path={q}">{name}</a> '
+                rows.append(f'<li>\U0001f4c1 <a href="/?path={q}">{shown}</a> '
                             f'<small>({n})</small> &nbsp;'
                             f'<a href="/zip?path={q}">⬇ zip</a></li>')
             elif name.lower().endswith(".jpg"):
-                rows.append(f'<li>\U0001f5bc <a href="/file?path={q}">{name}</a></li>')
+                rows.append(f'<li>\U0001f5bc <a href="/file?path={q}">{shown}</a></li>')
     up = ""
     if rel:
         parent = quote("/".join(rel.split("/")[:-1]))
         up = f'<a href="/?path={parent}">⬅ up</a>'
     return Response(
         '<div style="font-family:system-ui;max-width:720px;margin:24px auto">'
-        f'<h2>Printing Partner — orders</h2><p>{up} <b>/{rel}</b></p>'
+        f'<h2>Printing Partner — orders</h2><p>{up} <b>/{escape(rel)}</b></p>'
         f'<ul style="line-height:2;list-style:none;padding:0">{"".join(rows) or "<i>empty</i>"}</ul>'
         '</div>', mimetype="text/html")
 
@@ -540,7 +766,7 @@ def dashboard():
 def serve_file():
     if not _auth_ok():
         abort(403)
-    p = _safe_join("Printing Partner", request.args.get("path", ""))
+    p = _orders_path(request.args.get("path", ""))
     if not os.path.isfile(p):
         abort(404)
     with open(p, "rb") as fh:
@@ -551,7 +777,7 @@ def serve_file():
 def serve_zip():
     if not _auth_ok():
         abort(403)
-    p = _safe_join("Printing Partner", request.args.get("path", ""))
+    p = _orders_path(request.args.get("path", ""))
     if not os.path.isdir(p):
         abort(404)
     buf = io.BytesIO()
@@ -562,8 +788,14 @@ def serve_zip():
                 z.write(fp, os.path.relpath(fp, p))
     buf.seek(0)
     label = os.path.basename(p) or "orders"
+    # HTTP headers are latin-1: a folder name outside it made gunicorn drop the
+    # response ("Invalid HTTP Header"). ASCII fallback + RFC 5987 UTF-8 name.
+    ascii_label = "".join(c if (32 <= ord(c) < 127 and c not in '"\\') else "_"
+                          for c in label)
     return Response(buf.read(), mimetype="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{label}.zip"'})
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{ascii_label}.zip"; '
+                             f"filename*=UTF-8''{quote(label, safe='')}.zip"})
 
 
 if __name__ == "__main__":

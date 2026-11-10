@@ -8,7 +8,11 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/opt/printing-partner-backend
 EnvironmentFile=/opt/printing-partner-backend/.env
-ExecStart=/opt/printing-partner-backend/venv/bin/gunicorn -w 2 -b 127.0.0.1:8080 --timeout 120 app:app
+# gthread, NOT the default sync worker: a sync worker is killed (WORKER TIMEOUT -> 500)
+# when ONE request takes longer than --timeout, so a 9 MB order on a slow mobile
+# uplink (>120 s of upload) could never be filed. Threaded workers keep their
+# heartbeat while a slow body arrives, and 2x4 requests are served at once.
+ExecStart=/opt/printing-partner-backend/venv/bin/gunicorn -w 2 -k gthread --threads 4 -b 127.0.0.1:8080 --timeout 900 app:app
 Restart=always
 RestartSec=5
 
