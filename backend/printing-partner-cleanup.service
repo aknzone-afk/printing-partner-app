@@ -1,0 +1,9 @@
+[Unit]
+Description=Printing Partner disk cleanup (delete old order folders, warn on low disk)
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/printing-partner-backend
+EnvironmentFile=/opt/printing-partner-backend/.env
+ExecStart=/opt/printing-partner-backend/venv/bin/python /opt/printing-partner-backend/cleanup.py
