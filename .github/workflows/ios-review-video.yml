@@ -1,0 +1,94 @@
+# App Review demo video (Apple Guideline 2.1).
+# Boots an iPhone simulator on the latest iOS, screen-records it while
+# integration_test/review_flow_test.dart walks the customer flow, and uploads
+# the .mp4 as an artifact. Started by hand only (macOS minutes are costly).
+#
+# NOTE: review_flow_test.dart imports package:integration_test, which is NOT
+# yet in app/pubspec.yaml dev_dependencies. Before this workflow can run, the
+# owner must add (one line, see STORE_SUBMISSION.md):
+#     integration_test:
+#       sdk: flutter
+name: iOS review video
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  video:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 26
+        run: |
+          if [ -d /Applications/Xcode_26.6.app ]; then sudo xcode-select -s /Applications/Xcode_26.6.app; fi
+          xcodebuild -version
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.9
+          cache: true
+
+      - name: Flutter dependencies
+        working-directory: app
+        run: |
+          flutter config --no-analytics --no-enable-swift-package-manager
+          flutter pub get
+          flutter precache --ios
+
+      - name: Set up Ruby + gems (cocoapods)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: app/ios
+
+      - name: Install pods
+        working-directory: app/ios
+        run: bundle exec pod install --repo-update
+
+      - name: Boot an iPhone simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          rts=sorted([r for r in d if "iOS" in r], key=lambda r:[int(x) for x in r.split("iOS-")[1].split("-")])
+          for rt in reversed(rts):
+              ph=[x for x in d[rt] if x["name"].startswith("iPhone") and "Pro Max" not in x["name"] and "e" != x["name"][-1]]
+              ph=ph or [x for x in d[rt] if x["name"].startswith("iPhone")]
+              if ph: print(ph[-1]["udid"]); break')
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+          xcrun simctl list devices | grep "$UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
+
+      - name: Build the app for the simulator first (keeps the recording short)
+        working-directory: app
+        run: flutter build ios --simulator --debug --no-codesign
+
+      - name: Record the review flow
+        working-directory: app
+        run: |
+          UDID=${{ steps.sim.outputs.udid }}
+          mkdir -p ../out
+          xcrun simctl io "$UDID" recordVideo --codec=h264 --force ../out/printing_partner_review_flow.mp4 &
+          REC=$!
+          sleep 2
+          flutter test integration_test/review_flow_test.dart -d "$UDID" 2>&1 | tee ../out/test.log || true
+          sleep 2
+          kill -INT $REC
+          wait $REC || true
+          ls -la ../out
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: printing-partner-review-video
+          path: out/

@@ -16,6 +16,19 @@ WORKSPACE      = "Runner.xcworkspace"
 SCHEME         = "Runner"
 FLUTTER_DIR    = "../.."   # app/
 
+# App Store Connect API key (TEAM key, Admin role) — no Apple ID, no 2FA.
+# Reused by every lane that talks to App Store Connect.
+def asc_api_key
+  app_store_connect_api_key(
+    key_id:                ENV.fetch("ASC_KEY_ID"),
+    issuer_id:             ENV.fetch("ASC_ISSUER_ID"),
+    key_content:           ENV.fetch("ASC_KEY_P8_BASE64"),
+    is_key_content_base64: true,
+    duration:              1200,
+    in_house:              false
+  )
+end
+
 platform :ios do
   desc "Build the Flutter iOS app with match-managed signing and upload it to TestFlight"
   lane :beta do
@@ -120,6 +133,76 @@ platform :ios do
 
     UI.success("Uploaded #{APP_IDENTIFIER} #{marketing_version} (#{build_number}) to TestFlight.")
   end
+
+  # ---------------------------------------------------------------------------
+  # App Store (public release) lanes. The binary is uploaded by `beta` above;
+  # these push the store listing (metadata + screenshots) and, optionally,
+  # submit the newest TestFlight build for App Store review.
+  #
+  # Fill fastlane/metadata/en-US/* and drop store PNGs in fastlane/screenshots/
+  # (the "Store screenshots" workflow produces them) BEFORE running these.
+  # The final human "Submit" is the owner's call — SUBMIT_FOR_REVIEW defaults to
+  # false so a run never submits by accident; set SUBMIT_FOR_REVIEW=true only
+  # when the listing is complete and the owner wants to submit.
+  # ---------------------------------------------------------------------------
+
+  desc "Upload App Store metadata + screenshots (and optionally submit for review)"
+  lane :release do
+    submit = ENV.fetch("SUBMIT_FOR_REVIEW", "false") == "true"
+    deliver(
+      api_key:              asc_api_key,
+      app_identifier:       APP_IDENTIFIER,
+      team_id:              nil,
+      metadata_path:        "./fastlane/metadata",
+      screenshots_path:     "./fastlane/screenshots",
+      skip_binary_upload:   true,    # the IPA comes from the `beta` lane
+      skip_app_version_update: false,
+      submit_for_review:    submit,
+      automatic_release:    false,   # owner releases manually after approval
+      force:                true,    # no interactive HTML preview on CI
+      precheck_include_in_app_purchases: false,
+      submission_information: {
+        add_id_info_uses_idfa: false # Printing Partner shows no ads / no IDFA
+      }
+    )
+    UI.success("App Store listing pushed for #{APP_IDENTIFIER}. submit_for_review=#{submit}")
+  end
+
+  desc "Upload ONLY the store screenshots (fastlane/screenshots/<locale>/)"
+  lane :screenshots do
+    deliver(
+      api_key:            asc_api_key,
+      app_identifier:     APP_IDENTIFIER,
+      screenshots_path:   "./fastlane/screenshots",
+      skip_binary_upload: true,
+      skip_metadata:      true,
+      skip_app_version_update: true,
+      submit_for_review:  false,
+      force:              true
+    )
+    UI.success("Screenshots uploaded for #{APP_IDENTIFIER}.")
+  end
+
+  desc "Upload ONLY the text metadata (fastlane/metadata/)"
+  lane :metadata do
+    deliver(
+      api_key:            asc_api_key,
+      app_identifier:     APP_IDENTIFIER,
+      metadata_path:      "./fastlane/metadata",
+      skip_binary_upload: true,
+      skip_screenshots:   true,
+      skip_app_version_update: false,
+      submit_for_review:  false,
+      force:              true
+    )
+    UI.success("Metadata uploaded for #{APP_IDENTIFIER}.")
+  end
+
+  # The Apple-review demo video (Guideline 2.1) is produced by the
+  # .github/workflows/ios-review-video.yml workflow (simctl recordVideo around
+  # integration_test/review_flow_test.dart), matching the sibling apps — it is
+  # not a fastlane lane because the recording is driven by the CI runner's
+  # simctl, not by gym/pilot.
 
   error do |lane, exception|
     UI.error("Lane #{lane} failed: #{exception.message}")
