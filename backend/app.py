@@ -481,6 +481,31 @@ def verify_payment():
                    token=_make_token(amount, utr))
 
 
+def notify_telegram(text: str) -> None:
+    """Best-effort post to the shop's Telegram group. Never raises, so it can
+    never fail an order. Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID at call
+    time; silent no-op if either is unset."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat:
+        return
+    try:
+        import urllib.request
+        import urllib.parse
+        data = urllib.parse.urlencode({
+            "chat_id": chat,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }).encode()
+        urllib.request.urlopen(  # noqa: S310 (fixed Telegram host)
+            urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage", data=data),
+            timeout=10).read()
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("telegram notify failed: %s", e)
+
+
 @app.post("/ingest")
 def ingest():
     """Files one order's INDIVIDUAL cropped photos to the VM disk tree.
@@ -676,6 +701,25 @@ def ingest():
             _df.write(details)
     except Exception as _e:   # pragma: no cover
         app.logger.warning("ingest details write failed: %s", _e)
+
+    # Ping the shop's Telegram group with the new order (best-effort).
+    try:
+        amt = (payload or {}).get("amount")
+        lines = [
+            f"🆕 <b>New order #{escape(order_number or file_number)}</b>",
+            f"📸 {escape(raw_category)} · {escape(raw_size)} · {len(written)} photos",
+        ]
+        if amt:
+            lines.append(f"💰 ₹{float(amt):.0f} paid")
+        who = escape(str(meta.get('customerName') or '—'))
+        ph = escape(str(meta.get('customerPhone') or '—'))
+        lines.append(f"👤 {who} · {ph}")
+        addr = str(meta.get('address') or '').strip()
+        if addr:
+            lines.append(f"📍 {escape(addr[:250])}")
+        notify_telegram("\n".join(lines))
+    except Exception as _e:   # pragma: no cover
+        app.logger.warning("telegram order notify failed: %s", _e)
     return jsonify(ok=True, filed=len(written))
 
 
