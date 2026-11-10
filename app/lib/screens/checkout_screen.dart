@@ -19,6 +19,7 @@ import '../services/payment_verifier.dart';
 import '../services/pending_upload.dart';
 import '../services/photo_export.dart';
 import '../services/shop_contact.dart';
+import '../services/upi_apps.dart';
 import '../services/upi_qr.dart';
 import '../theme.dart';
 import '../widgets/primary_button.dart';
@@ -874,6 +875,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     ],
                   ),
                 ),
+                if (paise != null) ...[
+                  const SizedBox(height: 20),
+                  _PayWithApps(
+                    rupees: paise / 100.0,
+                    onNotInstalled: (name) => _showSnack(
+                        '$name not found on this phone — scan the QR above or copy the UPI id'),
+                    onFailed: () => _showSnack(
+                        'Couldn\'t open the app — scan the QR above instead'),
+                  ),
+                ],
                 const SizedBox(height: 24),
                 _Steps(amountLabel: amountLabel),
                 const SizedBox(height: 24),
@@ -1127,6 +1138,65 @@ class _BackendNotReady extends StatelessWidget {
 
 /// The merchant's UPI id under the QR, so a customer paying from the same phone
 /// (who cannot scan the QR on their own screen) can copy it and pay.
+/// Buttons that open a UPI app on THIS phone with the amount pre-filled — the
+/// one-tap alternative to scanning the QR.
+class _PayWithApps extends StatelessWidget {
+  const _PayWithApps({
+    required this.rupees,
+    required this.onNotInstalled,
+    required this.onFailed,
+  });
+  final num rupees;
+  final void Function(String appName) onNotInstalled;
+  final VoidCallback onFailed;
+
+  Future<void> _tap(UpiApp app) async {
+    final r = await launchUpiApp(app, rupees);
+    if (r == UpiLaunch.notInstalled) {
+      onNotInstalled(app.label);
+    } else if (r == UpiLaunch.failed) {
+      onFailed();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const Text('Or pay from this phone',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 10),
+        Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final app in upiApps)
+              SizedBox(
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: () => _tap(app),
+                  icon: Icon(Icons.account_balance_wallet_rounded,
+                      size: 18, color: app.color),
+                  label: Text(app.label,
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textPrimary,
+                    side: BorderSide(color: app.color.withValues(alpha: 0.5)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
 class _UpiIdRow extends StatelessWidget {
   const _UpiIdRow({required this.upiId, required this.onCopied});
   final String upiId;

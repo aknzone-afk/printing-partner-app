@@ -44,6 +44,7 @@ dependencies:
 
   # Persists order metadata across browser refreshes (localStorage on web)
   shared_preferences: ^2.3.3
+  url_launcher: ^6.3.1
 
   # Persists print-ready PDF bytes (too large for localStorage) — IndexedDB
   # on web is shared across tabs of the same origin
