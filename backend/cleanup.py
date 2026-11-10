@@ -55,6 +55,21 @@ def main() -> None:
                     log(f"ERROR removing {name}: {e}")
     log(f"cleanup done: {removed} folder(s) older than {RETENTION_DAYS}d removed")
 
+    # Privacy: purge any payment screenshots left over from orders that were
+    # verified but never completed (normally deleted the moment they're sent to
+    # Telegram). Nothing older than 2 days should remain.
+    shots = os.path.join(ROOT, "_payments", "shots")
+    shot_cut = time.time() - 2 * 86400
+    if os.path.isdir(shots):
+        for fn in os.listdir(shots):
+            fp = os.path.join(shots, fn)
+            try:
+                if os.path.isfile(fp) and os.path.getmtime(fp) < shot_cut:
+                    os.remove(fp)
+                    log(f"removed stale payment screenshot: {fn}")
+            except Exception as e:  # pragma: no cover
+                log(f"ERROR removing shot {fn}: {e}")
+
     try:
         usage = shutil.disk_usage(ROOT)
         pct = round(usage.used * 100 / usage.total)

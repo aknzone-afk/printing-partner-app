@@ -476,6 +476,9 @@ def verify_payment():
     if _utr_seen(utr):
         return jsonify(verified=False, amount=amount, utr=utr, payee=payee,
                        reason="This payment reference has already been used for an order.")
+    # Stash the payment screenshot keyed by UTR so /ingest can forward it to the
+    # shop's Telegram (the screenshot is not sent to /ingest). Best-effort.
+    _save_payment_shot(utr, img)
     return jsonify(verified=True, amount=amount, utr=utr, payee=payee,
                    reason=f"Payment of ₹{amount:.0f} confirmed. ✅",
                    token=_make_token(amount, utr))
@@ -555,6 +558,58 @@ def send_telegram_document(data, filename, caption=""):
         )
     except Exception as e:  # pragma: no cover
         app.logger.warning("telegram document failed: %s", e)
+
+
+def send_telegram_photo(data, caption=""):
+    """Best-effort: post an image (the payment screenshot) inline. Never raises."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat or not data:
+        return
+    try:
+        import requests
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data={"chat_id": chat, "caption": caption[:1000], "parse_mode": "HTML"},
+            files={"photo": ("payment.jpg", data, "image/jpeg")},
+            timeout=60,
+        )
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("telegram photo failed: %s", e)
+
+
+def _shot_path(utr: str) -> str:
+    d = os.path.join(filer.root, "_payments", "shots")
+    os.makedirs(d, exist_ok=True)
+    safe = "".join(c for c in str(utr) if c.isalnum())[:64] or "x"
+    return os.path.join(d, safe + ".jpg")
+
+
+def _save_payment_shot(utr: str, img: bytes) -> None:
+    if not utr or not img:
+        return
+    try:
+        with open(_shot_path(utr), "wb") as f:
+            f.write(img)
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("save payment shot failed: %s", e)
+
+
+def _take_payment_shot(utr: str):
+    """Read + delete the stashed screenshot for this UTR (one-shot)."""
+    if not utr:
+        return None
+    p = _shot_path(utr)
+    try:
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                b = f.read()
+            with contextlib.suppress(Exception):
+                os.remove(p)
+            return b
+    except Exception as e:  # pragma: no cover
+        app.logger.warning("read payment shot failed: %s", e)
+    return None
 
 
 @app.post("/ingest")
@@ -753,30 +808,38 @@ def ingest():
     except Exception as _e:   # pragma: no cover
         app.logger.warning("ingest details write failed: %s", _e)
 
-    # Ping the shop's Telegram group with the new order (best-effort).
+    # Post the order to the shop's Telegram group as THREE things, then a
+    # separator (owner 10-Nov): 1) full ship-to details in one text, 2) the
+    # print-ready PDF of all photos, 3) the customer's payment screenshot.
     try:
+        oid = escape(order_number or file_number)
         amt = (payload or {}).get("amount")
-        lines = [
-            f"🆕 <b>New order #{escape(order_number or file_number)}</b>",
-            f"📸 {escape(raw_category)} · {escape(raw_size)} · {len(written)} photos",
+        utr_val = str((payload or {}).get("utr") or "")
+        name = escape(str(meta.get('customerName') or '—'))
+        phone = escape(str(meta.get('customerPhone') or '—'))
+        addr = escape((str(meta.get('address') or '').strip() or '—')[:600])
+        text = [
+            f"🆕 <b>New order #{oid}</b>",
+            f"📦 {escape(raw_category)} · {escape(raw_size)} · {len(written)} photos",
         ]
         if amt:
-            lines.append(f"💰 ₹{float(amt):.0f} paid")
-        who = escape(str(meta.get('customerName') or '—'))
-        ph = escape(str(meta.get('customerPhone') or '—'))
-        lines.append(f"👤 {who} · {ph}")
-        addr = str(meta.get('address') or '').strip()
-        if addr:
-            lines.append(f"📍 {escape(addr[:250])}")
-        notify_telegram("\n".join(lines))
-        # ...then the printable PDF of all the order's photos, right below it.
+            text.append(f"💰 ₹{float(amt):.0f} paid"
+                        + (f" · UTR {escape(utr_val)}" if utr_val else ""))
+        text += ["", "🚚 <b>Ship to</b>",
+                 f"👤 {name}", f"📞 {phone}", f"🏠 {addr}"]
+        notify_telegram("\n".join(text))
+        # 2) print-ready PDF of all the photos
         pdf = build_order_pdf(photos)
         if pdf:
             send_telegram_document(
-                pdf,
-                f"Order {order_number or file_number}.pdf",
-                f"🖨 Order #{escape(order_number or file_number)} — all {len(written)} photos (print-ready)",
-            )
+                pdf, f"Order {order_number or file_number}.pdf",
+                f"🖨 Order #{oid} — all {len(written)} photos (print-ready)")
+        # 3) the customer's payment screenshot (stashed by /verify-payment)
+        shot = _take_payment_shot(utr_val)
+        if shot:
+            send_telegram_photo(shot, f"💳 Payment — Order #{oid}")
+        # separator before the next order
+        notify_telegram("➖➖➖➖➖➖➖➖➖➖")
     except Exception as _e:   # pragma: no cover
         app.logger.warning("telegram order notify failed: %s", _e)
     return jsonify(ok=True, filed=len(written))
