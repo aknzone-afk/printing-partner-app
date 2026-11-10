@@ -623,6 +623,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (pack != null && orders.findById(orderId) == null) {
       orders.place(OrderRecord(
         id: orderId,
+        orderNumber: _placedOrderNumber ?? '',
         placedAt: DateTime.tryParse(_placedAtIso ?? '')?.toLocal() ??
             DateTime.now(),
         customerName:

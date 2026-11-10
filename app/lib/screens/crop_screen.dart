@@ -65,6 +65,18 @@ class _CropScreenState extends State<CropScreen> {
     super.didChangeDependencies();
     if (_didInit) return;
     _didInit = true;
+    // Restore the saved rotation for every already-cropped photo BEFORE the
+    // first build, so the seeded viewer matrix (captured relative to the
+    // rotated photo) agrees with the rotation shown. Without this, a photo the
+    // customer manually rotated re-opens at rotation 0 with a matrix that means
+    // a different frame — showing, and on Save storing, the wrong crop.
+    final seedCart = context.read<Cart>();
+    for (final it in seedCart.items) {
+      final e = seedCart.cropFor(it.id);
+      if (e != null && !e.skipped && e.rotationSteps != 0) {
+        _rotations[it.id] = e.rotationSteps;
+      }
+    }
     bool hasI;
     try {
       hasI = GoRouterState.of(context).uri.queryParameters['i'] != null;
@@ -276,6 +288,12 @@ class _CropScreenState extends State<CropScreen> {
   /// [resolveImageSize] reads only the (EXIF-oriented) dimensions at a tiny
   /// decode size — never a full-resolution bitmap.
   Future<void> _autoOrientIfNeeded(PhotoItem item, double frameAspect) {
+    // A photo the customer has already reviewed carries its own saved rotation;
+    // never let the auto-orient probe override it (it would clobber a restored
+    // rotation and silently change the print).
+    if (context.read<Cart>().cropFor(item.id) != null) {
+      return Future<void>.value();
+    }
     return _orientFutures.putIfAbsent(
         item.id, () => _probeAndOrient(item, frameAspect));
   }
