@@ -6,7 +6,9 @@ import 'package:provider/provider.dart';
 import '../models/cart.dart';
 import '../models/order_record.dart';
 import '../models/orders_store.dart';
+import '../services/pending_upload.dart';
 import '../services/sheet_pdf.dart';
+import '../services/shop_contact.dart';
 import '../theme.dart';
 import '../utils/sample_images.dart';
 import '../widgets/polaroid_frame.dart';
@@ -32,6 +34,36 @@ class _HomeScreenState extends State<HomeScreen> {
   };
   static const _titles = ['PRINTING PARTNER', 'MY ORDERS', 'PROFILE'];
 
+  /// A paid order whose photos never reached us (screen left / app killed
+  /// mid-upload). Surfaced as a top card so it is not invisible after a
+  /// relaunch; tapping it resumes the upload in checkout — NOT a new payment.
+  PendingUpload? _pending;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPending();
+    // Pull the live status if we land straight on the Orders tab.
+    if (_tabIndex == 1) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) context.read<OrdersStore>().refreshFromCloud();
+      });
+    }
+  }
+
+  Future<void> _loadPending() async {
+    final p = await PendingUpload.load();
+    if (mounted) setState(() => _pending = p);
+  }
+
+  /// Opens checkout, which detects the pending record and resumes the upload.
+  /// On return we re-check: a finished (or expired) record clears the card.
+  Future<void> _resumePendingUpload() async {
+    await context.push('/checkout');
+    if (!mounted) return;
+    _loadPending();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -51,14 +83,19 @@ class _HomeScreenState extends State<HomeScreen> {
       body: IndexedStack(
         index: _tabIndex,
         children: [
-          const _HomeTab(),
+          _HomeTab(pending: _pending, onResume: _resumePendingUpload),
           const _OrdersTab(),
-          const _ProfileTab(),
+          _ProfileTab(onViewOrders: () => setState(() => _tabIndex = 1)),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
-        onDestinationSelected: (i) => setState(() => _tabIndex = i),
+        onDestinationSelected: (i) {
+          setState(() => _tabIndex = i);
+          // Reading the Orders tab pulls each order's live status from the
+          // cloud so it is not the frozen value saved at checkout.
+          if (i == 1) context.read<OrdersStore>().refreshFromCloud();
+        },
         destinations: const [
           NavigationDestination(
               icon: Icon(Icons.home_outlined),
@@ -79,17 +116,30 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 class _HomeTab extends StatelessWidget {
-  const _HomeTab();
+  const _HomeTab({this.pending, required this.onResume});
+
+  /// A paid-but-not-uploaded order, or null. When set, a resume card is shown
+  /// at the top of the home tab.
+  final PendingUpload? pending;
+  final VoidCallback onResume;
 
   @override
   Widget build(BuildContext context) {
     final cart = context.watch<Cart>();
+    final pending = this.pending;
     return SafeArea(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (pending != null) ...[
+              _PendingUploadCard(
+                orderNumber: pending.orderNumber,
+                onTap: onResume,
+              ),
+              const SizedBox(height: 16),
+            ],
             const SizedBox(height: 8),
             _ProductCard(
               title: 'Snaps',
@@ -136,6 +186,66 @@ class _HomeTab extends StatelessWidget {
   }
 }
 
+/// A paid order whose photos have not reached the shop yet (upload interrupted
+/// by leaving the screen or an app kill). Shown at the top of the home tab so
+/// the order is never invisible after a relaunch. Tapping it resumes the upload
+/// — it never re-shows the pay QR.
+class _PendingUploadCard extends StatelessWidget {
+  const _PendingUploadCard({required this.orderNumber, required this.onTap});
+
+  final String orderNumber;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFFFFF4E5),
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Semantics(
+          button: true,
+          label: 'Order number $orderNumber is paid but your photos have not '
+              'reached us yet. Tap to finish.',
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_upload_rounded, color: Color(0xFFB26A00)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Order #$orderNumber is paid',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF8A5300),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      const Text(
+                        'Your photos have not reached us yet — tap to finish.',
+                        style:
+                            TextStyle(fontSize: 13, color: Color(0xFF8A5300)),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded,
+                    color: Color(0xFFB26A00)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _OrdersTab extends StatelessWidget {
   const _OrdersTab();
 
@@ -143,25 +253,38 @@ class _OrdersTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final orders = context.watch<OrdersStore>().all;
     if (orders.isEmpty) {
-      return const SafeArea(
+      return SafeArea(
         child: Center(
           child: Padding(
-            padding: EdgeInsets.all(32),
+            padding: const EdgeInsets.all(32),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.receipt_long_outlined,
+                const Icon(Icons.receipt_long_outlined,
                     size: 80, color: AppColors.textSecondary),
-                SizedBox(height: 16),
-                Text('No orders yet',
+                const SizedBox(height: 16),
+                const Text('No orders yet',
                     style: TextStyle(
                         fontSize: 18, fontWeight: FontWeight.w600)),
-                SizedBox(height: 8),
-                Text(
-                  'Your past orders will appear here.',
+                const SizedBox(height: 8),
+                const Text(
+                  'Orders are kept on the phone they were placed from. If you '
+                  'reinstalled the app or switched to a new phone, your older '
+                  'orders won\'t show here — message the shop with the mobile '
+                  'number you used at checkout and we\'ll help you track them.',
                   style: TextStyle(color: AppColors.textSecondary),
                   textAlign: TextAlign.center,
                 ),
+                if (ShopContact.note.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    ShopContact.note,
+                    style: const TextStyle(
+                        color: AppColors.textSecondary,
+                        fontWeight: FontWeight.w600),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ],
             ),
           ),
@@ -280,6 +403,16 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
                 Flexible(child: _customerDownloadButton(order)),
               ],
             ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () =>
+                    context.push('/order-chat', extra: order.id),
+                icon: const Icon(Icons.chat_bubble_outline_rounded, size: 18),
+                label: const Text('Chat about this order'),
+              ),
+            ),
           ],
         ),
       ),
@@ -386,24 +519,21 @@ class _CustomerOrderCardState extends State<_CustomerOrderCard> {
                   color: AppColors.error)),
         );
       case SheetPdfStatus.archived:
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: AppColors.textSecondary.withValues(alpha: 0.10),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: const Text('Archived',
-              style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: AppColors.textSecondary)),
-        );
+        // Sheet PDFs are gone from the customer flow (the backend files the
+        // individual cropped photos), so a fresh order must not show a grey
+        // "Archived" badge.
+        return const SizedBox.shrink();
     }
   }
 }
 
 class _ProfileTab extends StatelessWidget {
-  const _ProfileTab();
+  const _ProfileTab({required this.onViewOrders});
+
+  /// Switches the host to the Orders tab (the ListTile is inside an
+  /// IndexedStack, so pushing `/home?tab=orders` would land on the same route
+  /// and do nothing — the parent flips the tab index instead).
+  final VoidCallback onViewOrders;
 
   @override
   Widget build(BuildContext context) {
@@ -450,7 +580,7 @@ class _ProfileTab extends StatelessWidget {
                 '${orders.count} order${orders.count == 1 ? '' : 's'} on this phone'),
             trailing: const Icon(Icons.chevron_right,
                 color: AppColors.textSecondary),
-            onTap: () => context.go('/home?tab=orders'),
+            onTap: onViewOrders,
           ),
         ],
       ),

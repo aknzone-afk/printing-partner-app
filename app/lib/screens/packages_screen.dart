@@ -8,6 +8,35 @@ import '../theme.dart';
 import '../utils/sample_images.dart';
 import '../widgets/polaroid_frame.dart';
 
+/// Handles a pack tap without silently throwing away photos the customer has
+/// already picked:
+///  • same pack tapped again → keep everything, go straight to the cart;
+///  • same size, different count → keep the photos + crops, just re-cap them
+///    to the new count (Cart.changePack);
+///  • a truly different size → start a fresh selection (Cart.selectPack).
+void _onPackTapped(BuildContext context, PrintPack pack) {
+  final cart = context.read<Cart>();
+  final current = cart.selectedPack;
+  if (!cart.isEmpty && current != null) {
+    final sameSize = current.size.category == pack.size.category &&
+        current.size.label == pack.size.label;
+    final samePack = sameSize &&
+        current.snapCount == pack.snapCount &&
+        current.priceInPaise == pack.priceInPaise;
+    if (samePack) {
+      context.push('/cart');
+      return;
+    }
+    if (sameSize) {
+      cart.changePack(pack);
+      context.push('/photos');
+      return;
+    }
+  }
+  cart.selectPack(pack);
+  context.push('/photos');
+}
+
 class PackagesScreen extends StatelessWidget {
   const PackagesScreen({super.key, required this.category});
 
@@ -134,10 +163,7 @@ class _PackPill extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () {
-          context.read<Cart>().selectPack(pack);
-          context.push('/photos');
-        },
+        onTap: () => _onPackTapped(context, pack),
         child: Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
@@ -228,10 +254,7 @@ class _PackBar extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () {
-          context.read<Cart>().selectPack(pack);
-          context.push('/photos');
-        },
+        onTap: () => _onPackTapped(context, pack),
         child: Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(

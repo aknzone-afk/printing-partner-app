@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -76,6 +77,45 @@ class OrdersStore extends ChangeNotifier {
     }
   }
 
+  /// Re-reads each order's live `status` from Firestore so My Orders reflects
+  /// the shop's real progress (received → printing → shipped → delivered)
+  /// instead of the value frozen at checkout. Offline-safe: a failure on one
+  /// order (no network, Firebase not ready, rules) is swallowed and leaves that
+  /// record untouched. Notifies (and persists) only if something actually
+  /// changed.
+  Future<void> refreshFromCloud() async {
+    if (_orders.isEmpty) return;
+    var changed = false;
+    for (final o in List<OrderRecord>.of(_orders)) {
+      try {
+        final snap = await FirebaseFirestore.instance
+            .collection('orders')
+            .doc(o.id)
+            .get();
+        final data = snap.data();
+        if (data == null) continue;
+        final raw = (data['status'] ?? '').toString();
+        OrderStatus? next;
+        for (final v in OrderStatus.values) {
+          if (v.name == raw) {
+            next = v;
+            break;
+          }
+        }
+        if (next != null && next != o.status) {
+          o.status = next;
+          changed = true;
+        }
+      } catch (e) {
+        debugPrint('[OrdersStore] refresh ${o.id} failed: $e');
+      }
+    }
+    if (changed) {
+      _save();
+      notifyListeners();
+    }
+  }
+
   /// Wipe everything (testing utility).
   Future<void> clearAll() async {
     _orders.clear();
@@ -107,11 +147,16 @@ class OrdersStore extends ChangeNotifier {
         final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
         // MERGE by id (don't clear+addAll): an order placed via place() during
         // this async startup gap must not be wiped by the restore. Restored
-        // records fill in only ids not already present.
+        // records fill in only ids not already present. They are inserted at
+        // the FRONT in their saved (oldest-first) order, BEFORE anything placed
+        // during the gap — `all` reverses this, so the newest order stays on
+        // top and the list no longer flips oldest-first each launch.
         final have = _orders.map((o) => o.id).toSet();
-        for (final rec in list.map(OrderRecord.fromJson)) {
-          if (!have.contains(rec.id)) _orders.insert(0, rec);
-        }
+        final restored = [
+          for (final rec in list.map(OrderRecord.fromJson))
+            if (!have.contains(rec.id)) rec
+        ];
+        _orders.insertAll(0, restored);
         debugPrint('[OrdersStore] restored ${_orders.length} orders');
         // For each restored order, try to hydrate its PDF from IndexedDB.
         // If found → flip status to ready and attach bytes.

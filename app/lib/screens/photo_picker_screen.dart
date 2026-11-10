@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+// PhotoManager / PermissionState come through this package's re-export.
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 import '../models/cart.dart';
+import '../services/photo_export.dart';
 import '../theme.dart';
 import '../widgets/photo_thumb.dart';
 import '../widgets/primary_button.dart';
@@ -42,6 +44,17 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
     final wasAutoOpen = _autoOpened && context.read<Cart>().isEmpty;
     setState(() => _picking = true);
     try {
+      // Ask for photo access first, so a denial shows a way forward (Settings)
+      // instead of a raw error from deep inside the picker.
+      final ps = await PhotoManager.requestPermissionExtend();
+      if (!mounted) return;
+      if (!ps.hasAccess) {
+        setState(() => _picking = false);
+        await _showPermissionDialog();
+        if (wasAutoOpen && mounted && context.canPop()) context.pop();
+        return;
+      }
+
       // wechat_assets_picker enforces maxAssets at the UI level — the user
       // physically cannot select more than the pack allows. The picker
       // displays a live "X / Y" counter and disables further checkmarks
@@ -59,19 +72,53 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
       );
       if (!mounted) return;
       if (result != null && result.isNotEmpty) {
-        // Convert AssetEntity -> local file path so the rest of the pipeline
-        // (cropping, PDF building) keeps working unchanged.
+        // Convert AssetEntity -> local file path. Resolve each asset on its
+        // own so one that can't load (e.g. still in iCloud, no network) can't
+        // throw away the rest of the selection.
         final paths = <String>[];
+        var failed = 0;
         for (final asset in result) {
-          final file = await asset.originFile;
-          if (file != null) paths.add(file.path);
+          try {
+            final file = await asset.originFile;
+            if (file != null) {
+              paths.add(file.path);
+            } else {
+              failed++;
+            }
+          } catch (_) {
+            failed++;
+          }
         }
         if (!mounted) return;
-        final cart = context.read<Cart>();
-        cart.addPhotos(paths);
 
-        if (_target > 0 && cart.itemCount >= _target && mounted) {
-          context.go('/crop');
+        // Validate each file BEFORE the customer ever pays: a corrupt /
+        // undecodable photo rejected here (not after payment at render time).
+        final good = <String>[];
+        var bad = 0;
+        for (final p in paths) {
+          if (await canDecodeImage(p)) {
+            good.add(p);
+          } else {
+            bad++;
+          }
+        }
+        if (!mounted) return;
+
+        final cart = context.read<Cart>();
+        if (good.isNotEmpty) cart.addPhotos(good);
+        if (failed > 0 || bad > 0) _showSkippedMessage(failed, bad);
+
+        if (_target > 0 &&
+            cart.itemCount >= _target &&
+            good.isNotEmpty &&
+            mounted) {
+          // push (not go): Android system Back on the auto-opened crop screen
+          // must return here, keeping the picked photos, not close the app.
+          context.push('/crop');
+          return;
+        }
+        if (good.isEmpty && wasAutoOpen && mounted && context.canPop()) {
+          context.pop();
           return;
         }
       } else if (wasAutoOpen && mounted) {
@@ -88,6 +135,51 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
     } finally {
       if (mounted) setState(() => _picking = false);
     }
+  }
+
+  Future<void> _showPermissionDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Photo access needed'),
+        content: const Text(
+          'Printing Partner needs permission to open your photos. Enable photo '
+          'access in Settings, then tap Open Gallery again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              PhotoManager.openSetting();
+            },
+            child: const Text('Open Settings'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSkippedMessage(int failed, int bad) {
+    if (!mounted) return;
+    final parts = <String>[];
+    if (failed > 0) {
+      parts.add('$failed photo${failed == 1 ? '' : 's'} could not be loaded '
+          '(they may be in iCloud) — pick ${failed == 1 ? 'it' : 'them'} '
+          'again');
+    }
+    if (bad > 0) {
+      parts.add('$bad photo${bad == 1 ? '' : 's'} could not be opened and '
+          '${bad == 1 ? 'was' : 'were'} skipped');
+    }
+    if (parts.isEmpty) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${parts.join('. ')}.')),
+    );
   }
 
   @override

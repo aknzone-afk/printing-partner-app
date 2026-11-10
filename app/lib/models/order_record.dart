@@ -4,6 +4,7 @@ import 'dart:typed_data';
 class OrderRecord {
   OrderRecord({
     required this.id,
+    this.orderNumber = '',
     required this.placedAt,
     required this.customerName,
     required this.customerPhone,
@@ -21,6 +22,11 @@ class OrderRecord {
   });
 
   final String id;
+
+  /// The real, human-facing order number minted in Firestore (e.g. "42"),
+  /// shown in checkout / chat / shop. Empty on legacy records placed before
+  /// this field existed — then [displayId] falls back to the short id.
+  final String orderNumber;
   final DateTime placedAt;
   final String customerName;
   final String customerPhone;
@@ -43,7 +49,9 @@ class OrderRecord {
   String get totalLabel => '₹${(totalPaise / 100).toStringAsFixed(0)}';
   String get sheetsLabel =>
       '$sheetsNeeded sheet${sheetsNeeded == 1 ? '' : 's'}';
-  String get displayId => '#${id.substring(0, 6).toUpperCase()}';
+  String get displayId => orderNumber.isNotEmpty
+      ? '#$orderNumber'
+      : '#${id.substring(0, 6).toUpperCase()}';
   String get pdfFilename {
     String s(String x) =>
         x.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_').toLowerCase();
@@ -64,6 +72,7 @@ class OrderRecord {
   /// merchant must re-request it from the customer.
   Map<String, dynamic> toJson() => {
         'id': id,
+        'orderNumber': orderNumber,
         'placedAt': placedAt.toIso8601String(),
         'customerName': customerName,
         'customerPhone': customerPhone,
@@ -102,6 +111,7 @@ class OrderRecord {
 
     return OrderRecord(
       id: s('id', DateTime.now().millisecondsSinceEpoch.toString()),
+      orderNumber: s('orderNumber'),
       placedAt: DateTime.tryParse(s('placedAt')) ?? DateTime.now(),
       customerName: s('customerName', 'Customer'),
       customerPhone: s('customerPhone'),

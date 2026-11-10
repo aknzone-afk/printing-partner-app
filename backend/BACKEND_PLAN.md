@@ -23,19 +23,23 @@ segment and realpath-guards against DATA_ROOT.
 ## Endpoints
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | `{ok, ai}` — `ai:false` until GEMINI_API_KEY is set |
+| `GET /health` | none | `{ok, ai, catalog}` — `ai:false` until GEMINI_API_KEY is set; `catalog` = pack count (`0` = catalog.json not deployed). The app hides the QR until `ok && ai && catalog>0`. |
 | `POST /verify-payment` | `X-App-Token` | screenshot+amount → Gemini → `{verified, reason, amount, utr, payee, token}` |
 | `POST /ingest` | payment `token` | cropped JPEGs + `{orderNumber, category, size, placedAt}` → filed to disk |
 | `POST /chat` | `X-App-Token` | order facts + question → Gemini reply |
 | `GET /`, `POST /login`, `/file`, `/zip` | dashboard cookie | merchant browse + per-folder ZIP |
 
 ## Files (this folder = source of truth; mirrored in `pp-repo/backend/`)
-`app.py` · `filer.py` · `requirements.txt` · `printing-partner-backend.service` · `env.example`
+`app.py` · `filer.py` · `catalog.json` · `requirements.txt` · `printing-partner-backend.service` · `env.example`
+
+> **Deploy must include `catalog.json`** — without it `/ingest` has an empty price
+> table and every paid order is rejected `400 unknown_pack`. `GET /health` reports
+> `catalog` (the pack count); treat `catalog: 0` as "not deployed".
 
 ## Ops
 ```bash
 # deploy (from the PC; key = YouTubeAutoReply/oracle-deploy/oracle_vm_key)
-scp -i KEY app.py filer.py requirements.txt ubuntu@130.210.24.18:/opt/printing-partner-backend/
+scp -i KEY app.py filer.py catalog.json requirements.txt ubuntu@130.210.24.18:/opt/printing-partner-backend/
 ssh -i KEY ubuntu@130.210.24.18 'sudo systemctl restart printing-partner-backend && systemctl is-active printing-partner-backend'
 # logs
 ssh -i KEY ubuntu@130.210.24.18 'journalctl -u printing-partner-backend -n 50 --no-pager'

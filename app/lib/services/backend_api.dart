@@ -132,6 +132,31 @@ class BackendApi {
     }
   }
 
+  /// GET /health (no auth). Reports whether the backend can actually take a
+  /// payment right now: `ok` (server up), `ai` (Gemini configured) and
+  /// `catalog` (pack count — 0 means catalog.json is not deployed, so every
+  /// order would be rejected). Never throws: on a non-200, a malformed body or
+  /// any network/timeout failure it returns `(ok:false, ai:false, catalog:0)`,
+  /// so the caller keeps the QR hidden rather than letting anyone pay blind.
+  static Future<({bool ok, bool ai, int catalog})> health() async {
+    try {
+      final res =
+          await http.get(_u('/health')).timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) {
+        return (ok: false, ai: false, catalog: 0);
+      }
+      final body = _decodeMap(res.body);
+      return (
+        ok: body['ok'] == true,
+        ai: body['ai'] == true,
+        catalog: _int(body['catalog']),
+      );
+    } catch (e) {
+      debugPrint('[BackendApi] health failed: $e');
+      return (ok: false, ai: false, catalog: 0);
+    }
+  }
+
   /// Upload timeout for a multipart body of [totalBytes]: a 90 s floor plus
   /// ~25 s per MB (a 40 KB/s uplink floor), so a 36-photo order on slow mobile
   /// data is never cut off mid-body only to be retried as a UTR reuse.
@@ -247,5 +272,12 @@ class BackendApi {
     if (v == null) return null;
     final s = '$v'.trim();
     return s.isEmpty ? null : s;
+  }
+
+  static int _int(Object? v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v.trim()) ?? 0;
+    return 0;
   }
 }

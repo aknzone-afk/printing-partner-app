@@ -1,6 +1,5 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -17,6 +16,7 @@ import '../services/firebase/order_repository.dart';
 import '../services/payment_verifier.dart';
 import '../services/pending_upload.dart';
 import '../services/photo_export.dart';
+import '../services/shop_contact.dart';
 import '../services/upi_qr.dart';
 import '../theme.dart';
 import '../widgets/primary_button.dart';
@@ -59,6 +59,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   int? _authoritativePaise;
   bool _priceError = false;
 
+  /// Backend readiness from GET /health. Null while unknown/checking; true only
+  /// when the server is up AND Gemini is configured AND the catalog is loaded.
+  /// The QR + attach button stay hidden until this is true, so a customer can
+  /// never pay while the server cannot actually verify the payment (no Gemini)
+  /// or would reject every order (empty catalog).
+  bool? _backendReady;
+  bool _healthChecking = false;
+
   /// Client-chosen Firestore id for this checkout attempt. Minted once and
   /// reused, so a createOrder whose commit succeeded but whose answer was lost
   /// is found again instead of producing a second order + number.
@@ -97,9 +105,31 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkHealth();
       _loadPrice();
       _restorePending();
     });
+  }
+
+  /// Ask the backend whether it can actually take a payment right now (server
+  /// up, Gemini configured, catalog loaded). Never throws.
+  Future<void> _checkHealth() async {
+    if (_healthChecking) return;
+    if (mounted) setState(() => _healthChecking = true);
+    bool ready = false;
+    try {
+      final h = await BackendApi.health();
+      ready = h.ok && h.ai && h.catalog > 0;
+    } catch (e) {
+      debugPrint('[Checkout] health check failed: $e');
+      ready = false;
+    }
+    if (mounted) {
+      setState(() {
+        _backendReady = ready;
+        _healthChecking = false;
+      });
+    }
   }
 
   static String _packKey(PrintPack pack) =>
@@ -129,14 +159,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_placedOrderId != null || _busy) return; // already placing here
     final cart = context.read<Cart>();
     final pack = cart.selectedPack;
+    String? currentUid;
+    try {
+      currentUid = AuthService.instance.uid;
+    } catch (_) {
+      currentUid = null; // Firebase not initialised yet: uid unknown
+    }
     if (pack == null ||
         cart.isEmpty ||
-        _packKey(pack) != rec.packKey ||
-        cart.itemCount != rec.photoCount) {
-      // A different cart (new pack picked): leave the record alone, it
-      // expires with the token. This checkout is a new order.
+        !rec.isFor(
+          uid: currentUid,
+          packKey: _packKey(pack),
+          photoCount: cart.itemCount,
+        )) {
+      // A different cart (new pack picked) or a different customer uid: leave
+      // the record alone, it expires with the token. This checkout is a new
+      // order.
       debugPrint('[Checkout] pending upload #${rec.orderNumber} does not '
-          'match this cart — not resumed');
+          'match this cart / customer — not resumed');
       return;
     }
     setState(() {
@@ -464,6 +504,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           'snapCount': pack?.snapCount ?? 0,
           if (paise != null) 'amountRupees': paise / 100.0,
           'placedAt': _placedAtIso ?? DateTime.now().toUtc().toIso8601String(),
+          // So the merchant receives WHO the order is for (the server writes
+          // these next to the photos); the server length-caps them.
+          'customerName': cart.customerName,
+          'customerPhone':
+              cart.customerPhone.isEmpty ? '' : '+91${cart.customerPhone}',
+          'address': cart.fullAddress,
         },
         token: token,
         photosJpg: jpgs,
@@ -523,6 +569,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             'The server could not confirm this payment, so the photos were '
             'not sent. Order #${_placedOrderNumber ?? ''} is saved — please '
             'contact us; do not pay again.');
+        return;
+      }
+
+      if (res.status == 400) {
+        // A 400 from /ingest is a permanent content problem (pack not in the
+        // catalog — e.g. catalog.json not deployed — amount/pack mismatch,
+        // order number already taken, empty photo). Retrying the same photos
+        // will always fail, so reject with a clear message instead of looping
+        // on "Retry upload".
+        final detail = (res.error == null || res.error!.isEmpty)
+            ? 'the order details did not match our catalogue'
+            : res.error == 'unknown_pack'
+                ? 'this print pack is not set up on the server yet'
+                : res.error!;
+        await _reject(orderId, '${res.status}: ${res.error ?? ''}',
+            'We could not file this order ($detail), so your photos were not '
+            'sent. Payment for order #${_placedOrderNumber ?? ''} is saved — '
+            'please contact the shop; do not pay again.');
         return;
       }
 
@@ -630,6 +694,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final reattachMode =
         _placedOrderId != null && _needsFreshToken && !_rejected;
     final canPay = retryMode || (paise != null && !_busy);
+    // Gate only a FRESH payment on backend readiness: an order that is already
+    // placed must still be able to finish its upload even while a health probe
+    // is pending or failed.
+    final showSetup = _placedOrderId == null && _backendReady != true;
 
     return PopScope(
       // Never leave while an order is being created / sent: the resume state
@@ -668,7 +736,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 _PriceError(onRetry: _loadPrice),
               ],
               const SizedBox(height: 20),
-              if (!UpiQr.configured)
+              if (showSetup)
+                _BackendNotReady(
+                    checking: _healthChecking, onRetry: _checkHealth)
+              else if (!UpiQr.configured)
                 _SetupPending()
               else ...[
                 Center(
@@ -717,6 +788,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                               fontSize: 13, color: AppColors.textSecondary)),
+                      const SizedBox(height: 14),
+                      _UpiIdRow(
+                        upiId: UpiQr.merchantUpiId,
+                        onCopied: () => _showSnack('UPI id copied'),
+                      ),
                     ],
                   ),
                 ),
@@ -756,17 +832,30 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         color: const Color(0xFFFDECEA),
                         borderRadius: BorderRadius.circular(10),
                       ),
-                      child: Row(
+                      child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.info_outline,
-                              color: Color(0xFFC0392B), size: 18),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(_error!,
-                                style: const TextStyle(
-                                    fontSize: 13, color: Color(0xFFC0392B))),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.info_outline,
+                                  color: Color(0xFFC0392B), size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(_error!,
+                                    style: const TextStyle(
+                                        fontSize: 13, color: Color(0xFFC0392B))),
+                              ),
+                            ],
                           ),
+                          if (ShopContact.whatsapp.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            _ContactRow(
+                              whatsapp: ShopContact.whatsapp,
+                              onCopied: () => _showSnack('Number copied'),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -867,7 +956,9 @@ class _Steps extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         row('1',
-            'Scan the QR above with GPay / PhonePe / Paytm and pay $amountLabel.'),
+            'Pay $amountLabel. From another phone, scan the QR above with GPay '
+            '/ PhonePe / Paytm. On this phone, screenshot the QR and open it in '
+            'your UPI app, or tap Copy and pay the UPI id above.'),
         row('2', 'Take a screenshot of the "payment successful" screen.'),
         row('3',
             'Tap below and attach that screenshot — we confirm it instantly.'),
@@ -898,6 +989,131 @@ class _SetupPending extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Shown instead of the QR + attach button when the backend cannot yet take a
+/// payment (health probe unknown/failed, Gemini off, or empty catalog). Lets
+/// the customer re-check without leaving the screen, so no one pays blind.
+class _BackendNotReady extends StatelessWidget {
+  const _BackendNotReady({required this.checking, required this.onRetry});
+  final bool checking;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF4E5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.hourglass_bottom_rounded, color: Color(0xFFB26A00)),
+              SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Payments are being set up, please try again shortly.',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF8A5300)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: checking
+                ? const Padding(
+                    padding: EdgeInsets.all(8),
+                    child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2)),
+                  )
+                : TextButton.icon(
+                    onPressed: onRetry,
+                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                    label: const Text('Retry'),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The merchant's UPI id under the QR, so a customer paying from the same phone
+/// (who cannot scan the QR on their own screen) can copy it and pay.
+class _UpiIdRow extends StatelessWidget {
+  const _UpiIdRow({required this.upiId, required this.onCopied});
+  final String upiId;
+  final VoidCallback onCopied;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text('UPI id: ',
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        Flexible(
+          child: SelectableText(
+            upiId,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.copy_rounded, size: 18),
+          tooltip: 'Copy UPI id',
+          visualDensity: VisualDensity.compact,
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: upiId));
+            onCopied();
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// The shop's WhatsApp number inside an error box, so "contact the shop" is
+/// actionable: selectable + one-tap copy.
+class _ContactRow extends StatelessWidget {
+  const _ContactRow({required this.whatsapp, required this.onCopied});
+  final String whatsapp;
+  final VoidCallback onCopied;
+
+  @override
+  Widget build(BuildContext context) {
+    const red = Color(0xFFC0392B);
+    return Row(
+      children: [
+        const Icon(Icons.chat_rounded, size: 16, color: red),
+        const SizedBox(width: 6),
+        const Text('WhatsApp: ', style: TextStyle(fontSize: 13, color: red)),
+        Flexible(
+          child: SelectableText(
+            whatsapp,
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w700, color: red),
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.copy_rounded, size: 18, color: red),
+          tooltip: 'Copy number',
+          visualDensity: VisualDensity.compact,
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: whatsapp));
+            onCopied();
+          },
+        ),
+      ],
     );
   }
 }

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../services/backend_api.dart';
+import '../services/shop_contact.dart';
 import '../theme.dart';
 
 /// A friendly AI assistant that answers the customer A-to-Z about THEIR order —
@@ -149,8 +150,6 @@ class _OrderChatScreenState extends State<OrderChatScreen> {
     final rupees = paise == null ? null : (paise / 100).toStringAsFixed(0);
 
     final status = s(d['status']).isEmpty ? 'received' : s(d['status']);
-    final deliveryStatus =
-        s(delivery['status']).isEmpty ? 'pending' : s(delivery['status']);
 
     // Backend (VM) filing state — the only field that says whether the shop
     // actually accepted the payment AND received the photos. Written under
@@ -216,8 +215,6 @@ class _OrderChatScreenState extends State<OrderChatScreen> {
     final pack = s(d['productTitle']);
     final snapCount = n(d['snapCount']);
     final photoCount = n(d['photoCount']);
-    final sheetsNeeded = n(d['sheetsNeeded']);
-    final sheetsUploaded = n(delivery['sheetsUploaded']);
 
     final addressParts = [
       s(addr['line1']),
@@ -243,14 +240,12 @@ class _OrderChatScreenState extends State<OrderChatScreen> {
       if (photosLine != null) photosLine,
       if (utr.isNotEmpty) 'Payment reference (UTR): $utr',
       'Fulfilment status: $status',
-      'Delivery status: $deliveryStatus',
-      if (sheetsNeeded != null)
-        'Print sheets prepared: ${sheetsUploaded ?? 0} of $sheetsNeeded',
       if (s(d['customerName']).isNotEmpty) 'Customer name: ${s(d['customerName'])}',
       if (s(d['customerPhone']).isNotEmpty)
         'Contact phone: ${s(d['customerPhone'])}',
       if (addressParts.isNotEmpty) 'Shipping address: ${addressParts.join(', ')}',
       'Typical delivery: 3–5 days across India after dispatch.',
+      if (ShopContact.note.isNotEmpty) 'Shop contact: ${ShopContact.note}',
       'Meaning of fulfilment statuses: received = '
           '${placedAndPaid ? 'order placed and paid' : 'order placed (see payment/photos status above — not yet complete)'}; '
           'printing = your photos are being printed; shipped = on the way to you; '
@@ -560,17 +555,19 @@ class _Composer extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
+            // Stays enabled while a reply is in flight so the keyboard and
+            // focus are NOT dismissed after each message. `onSend` (and
+            // `_send`) already no-op while sending, so this can't double-send.
             child: TextField(
               controller: controller,
-              enabled: enabled,
               textInputAction: TextInputAction.send,
-              onSubmitted: enabled ? (_) => onSend() : null,
-              decoration: InputDecoration(
-                hintText: enabled ? 'Ask about your order…' : 'Waiting for reply…',
-                border: const OutlineInputBorder(),
+              onSubmitted: (_) => onSend(),
+              decoration: const InputDecoration(
+                hintText: 'Ask about your order…',
+                border: OutlineInputBorder(),
                 isDense: true,
                 contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               ),
             ),
           ),

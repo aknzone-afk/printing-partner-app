@@ -28,52 +28,68 @@ class OrderPlacedScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const SizedBox(height: 24),
-              Container(
-                height: 96,
-                width: 96,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: AppColors.success.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(48),
-                ),
-                child: const Icon(Icons.check_rounded,
-                    size: 64, color: AppColors.success),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'Order placed!',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
-              ),
-              if (order != null) ...[
-                const SizedBox(height: 6),
-                Text(
-                  order.displayId,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.primary,
-                    letterSpacing: 0.5,
+              // Scrollable content so the success summary never overflows (and
+              // cuts off the buttons) on short phones; the actions stay pinned
+              // below.
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 24),
+                      Center(
+                        child: Container(
+                          height: 96,
+                          width: 96,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: AppColors.success.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(48),
+                          ),
+                          child: const Icon(Icons.check_rounded,
+                              size: 64, color: AppColors.success),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Order placed!',
+                        textAlign: TextAlign.center,
+                        style:
+                            TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
+                      ),
+                      if (order != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          order.displayId,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.primary,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        _OrderSummaryCard(order: order),
+                      ] else ...[
+                        const SizedBox(height: 12),
+                        const Text(
+                          'Your prints are on the way.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 15,
+                              color: AppColors.textSecondary,
+                              height: 1.5),
+                        ),
+                      ],
+                      const SizedBox(height: 20),
+                      const _NextStepsCard(),
+                      const SizedBox(height: 20),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 20),
-                _OrderSummaryCard(order: order),
-              ] else ...[
-                const SizedBox(height: 12),
-                const Text(
-                  'Your prints are on the way.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 15,
-                      color: AppColors.textSecondary,
-                      height: 1.5),
-                ),
-              ],
-              const SizedBox(height: 20),
-              const _NextStepsCard(),
-              const Spacer(),
+              ),
+              const SizedBox(height: 8),
               PrimaryButton(
                 label: 'Track my order',
                 icon: Icons.receipt_long_rounded,
@@ -197,7 +213,7 @@ class _NextStepsCard extends StatelessWidget {
             SizedBox(height: 8),
             _Step(
               icon: Icons.home_outlined,
-              text: 'Delivered to your door in 3-5 days total.',
+              text: 'Delivered to your door in 3-5 days after dispatch.',
             ),
           ],
         ),

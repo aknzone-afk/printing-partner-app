@@ -1,8 +1,5 @@
-import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -10,6 +7,7 @@ import 'package:vector_math/vector_math_64.dart' show Vector3;
 
 import '../models/cart.dart';
 import '../models/photo_item.dart';
+import '../services/photo_export.dart';
 import '../theme.dart';
 import '../widgets/photo_thumb.dart';
 import '../widgets/primary_button.dart';
@@ -34,17 +32,61 @@ class _CropScreenState extends State<CropScreen> {
   late int _index = widget.startIndex;
   final Map<String, TransformationController> _controllers = {};
   final Map<String, int> _rotations = {}; // 0..3 (× 90°)
-  final Set<String> _autoOriented = {};
+  // Per-photo orientation probe, cached so bulk actions can AWAIT it (every
+  // photo's auto-rotation must be known before a crop is written for it).
+  final Map<String, Future<void>> _orientFutures = {};
   final GlobalKey _viewerKey = GlobalKey();
 
-  /// EXIF-upright pixel size per photo (from the orientation probe), needed to
-  /// turn the viewer matrix into a crop rect the export can reproduce.
-  final Map<String, Size> _sizes = {};
+  /// True when this screen was opened to edit ONE photo from the cart
+  /// (`/crop?i=N`) rather than to review the whole set. Back / Save then return
+  /// to the cart instead of stepping through the other photos.
+  bool _single = false;
+  bool _didInit = false;
 
-  TransformationController _ctrlFor(String id) =>
-      _controllers.putIfAbsent(id, () => TransformationController());
+  /// Seeds the viewer matrix from a previously-saved crop so re-opening a photo
+  /// shows exactly what the customer framed (not the default fit).
+  TransformationController _ctrlFor(String id) {
+    return _controllers.putIfAbsent(id, () {
+      final ctrl = TransformationController();
+      final edit = context.read<Cart>().cropFor(id);
+      if (edit != null && !edit.skipped && edit.hasView) {
+        ctrl.value = Matrix4.identity()
+          ..translate(edit.offsetX, edit.offsetY)
+          ..scale(edit.scale, edit.scale);
+      }
+      return ctrl;
+    });
+  }
 
   int _rotFor(String id) => _rotations[id] ?? 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_didInit) return;
+    _didInit = true;
+    bool hasI;
+    try {
+      hasI = GoRouterState.of(context).uri.queryParameters['i'] != null;
+    } catch (_) {
+      hasI = widget.startIndex > 0;
+    }
+    _single = hasI;
+    if (hasI) {
+      _index = widget.startIndex;
+      return;
+    }
+    // Whole-set review: open the FIRST photo that has no crop yet, so the
+    // customer resumes where they left off instead of always at photo 1.
+    final cart = context.read<Cart>();
+    for (var i = 0; i < cart.items.length; i++) {
+      if (cart.cropFor(cart.items[i].id) == null) {
+        _index = i;
+        return;
+      }
+    }
+    _index = 0;
+  }
 
   @override
   void dispose() {
@@ -55,6 +97,10 @@ class _CropScreenState extends State<CropScreen> {
   }
 
   void _back() {
+    if (_single) {
+      context.canPop() ? context.pop() : context.go('/cart');
+      return;
+    }
     if (_index == 0) {
       context.canPop() ? context.pop() : context.go('/photos');
       return;
@@ -65,90 +111,74 @@ class _CropScreenState extends State<CropScreen> {
   void _save() {
     final cart = context.read<Cart>();
     final item = cart.items[_index];
+    // Record EXACTLY what is on screen right now — the viewer matrix (pan +
+    // zoom), the frame it applies to, and the rotation the customer is looking
+    // at. The orientation probe only auto-rotates on LOAD; by the time Save is
+    // tapped whatever rotation is applied IS what was seen, so we must not wait
+    // for the probe (that would block Save) nor let it change the rotation
+    // afterwards — the print must match the screen the customer saved from.
     final m = _ctrlFor(item.id).value;
-    cart.setCrop(
-      item.id,
-      CropEdit.cropped(
-        offsetX: m.getTranslation().x,
-        offsetY: m.getTranslation().y,
-        scale: m.getMaxScaleOnAxis(),
-        rotationSteps: _rotFor(item.id),
-        crop: _cropRectFor(item.id, m),
-      ),
-    );
+    final rotation = _rotFor(item.id);
+    // The frame the customer is looking at = the viewer matrix plus the size of
+    // the frame it applies to. The export replays exactly that against the
+    // photo's true pixel size (cropFrameRect).
+    final box = _viewerKey.currentContext?.findRenderObject() as RenderBox?;
+    final frame = (box != null && box.hasSize) ? box.size : Size.zero;
+    if (frame.width <= 0 || frame.height <= 0) {
+      // Frame size still unknown (viewer not laid out yet): fall back to
+      // white-pad (BoxFit.contain), which is what the screen was showing —
+      // never a surprise centre-cover.
+      cart.setCrop(item.id, CropEdit.skipped(rotationSteps: rotation));
+    } else {
+      cart.setCrop(
+        item.id,
+        CropEdit.cropped(
+          offsetX: m.getTranslation().x,
+          offsetY: m.getTranslation().y,
+          scale: m.getMaxScaleOnAxis(),
+          rotationSteps: rotation,
+          viewWidth: frame.width,
+          viewHeight: frame.height,
+        ),
+      );
+    }
     _advance();
   }
 
-  /// The frame the customer is looking at, expressed in the ROTATED photo's
-  /// normalised coordinates. The viewer shows the photo BoxFit.contain inside
-  /// a W×H frame (RotatedBox swaps the photo's sides for odd turns); the
-  /// InteractiveViewer matrix maps that scene onto the frame. Inverting it at
-  /// the frame's corners gives the visible scene rect, which is then rebased
-  /// onto the contain-fitted photo box. Null when the on-screen size or the
-  /// photo size is unknown (export falls back to centre-cover).
-  Rect? _cropRectFor(String id, Matrix4 m) {
-    final box = _viewerKey.currentContext?.findRenderObject() as RenderBox?;
-    final photo = _sizes[id];
-    if (box == null || !box.hasSize || photo == null) return null;
-    final w = box.size.width;
-    final h = box.size.height;
-    if (w <= 0 || h <= 0 || photo.width <= 0 || photo.height <= 0) return null;
-
-    final odd = _rotFor(id).isOdd;
-    final pw = odd ? photo.height : photo.width;
-    final ph = odd ? photo.width : photo.height;
-    final r = pw / ph;
-    final frameAspect = w / h;
-    final cw = r > frameAspect ? w : h * r;
-    final ch = r > frameAspect ? w / r : h;
-    final ox = (w - cw) / 2;
-    final oy = (h - ch) / 2;
-
-    final Matrix4 inv;
-    try {
-      inv = Matrix4.inverted(m);
-    } catch (_) {
-      return null; // singular matrix: nothing sensible to record
-    }
-    final tl = inv.transform3(Vector3(0, 0, 0));
-    final br = inv.transform3(Vector3(w, h, 0));
-    final rect = Rect.fromLTRB(
-      (tl.x - ox) / cw,
-      (tl.y - oy) / ch,
-      (br.x - ox) / cw,
-      (br.y - oy) / ch,
-    );
-    if (!rect.left.isFinite ||
-        !rect.top.isFinite ||
-        !rect.right.isFinite ||
-        !rect.bottom.isFinite ||
-        rect.width <= 0 ||
-        rect.height <= 0) {
-      return null;
-    }
-    return rect;
-  }
-
-  /// Mark EVERY photo as skipped (white-pad) and jump to cart. Covers all
-  /// photos (not just from the current index) so the cart never bounces back
-  /// to "Review crops" because an earlier photo the user jumped past is still
-  /// unreviewed.
-  void _skipAll() {
+  /// White-pad the current photo AND every still-unreviewed photo, then jump to
+  /// cart. Photos the customer already cropped are left untouched (except the
+  /// one on screen). Each photo's auto-rotation is awaited first so a
+  /// never-opened landscape photo is still rotated to fill the frame.
+  Future<void> _skipRest() async {
     final cart = context.read<Cart>();
+    final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
     for (var i = 0; i < cart.items.length; i++) {
       final item = cart.items[i];
+      if (i != _index && cart.cropFor(item.id) != null) continue;
+      try {
+        await _autoOrientIfNeeded(item, aspect);
+      } catch (_) {}
+      if (!mounted) return;
       cart.setCrop(
           item.id, CropEdit.skipped(rotationSteps: _rotFor(item.id)));
     }
-    context.go('/cart');
+    if (mounted) context.go('/cart');
   }
 
-  /// Auto-crop EVERY photo: center, fill the frame, no white space. Covers all
-  /// photos (not just from the current index) so none is left unreviewed.
-  void _autoCropAll() {
+  /// Auto-crop (centre, fill the frame) the current photo AND every still-
+  /// unreviewed photo, then jump to cart. Already-cropped photos (except the
+  /// one on screen) keep their manual crop. Auto-rotation is awaited first so
+  /// identical photos print identically.
+  Future<void> _autoCropRest() async {
     final cart = context.read<Cart>();
+    final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
     for (var i = 0; i < cart.items.length; i++) {
       final item = cart.items[i];
+      if (i != _index && cart.cropFor(item.id) != null) continue;
+      try {
+        await _autoOrientIfNeeded(item, aspect);
+      } catch (_) {}
+      if (!mounted) return;
       cart.setCrop(
         item.id,
         CropEdit.cropped(
@@ -159,10 +189,15 @@ class _CropScreenState extends State<CropScreen> {
         ),
       );
     }
-    context.go('/cart');
+    if (mounted) context.go('/cart');
   }
 
   void _advance() {
+    // Editing a single photo from the cart: one Save, back to the cart.
+    if (_single) {
+      context.go('/cart');
+      return;
+    }
     final cart = context.read<Cart>();
     // Go to the next UNREVIEWED photo. If none exists, return to cart.
     // This makes the button work for both first-time flow and cart re-edits.
@@ -236,13 +271,19 @@ class _CropScreenState extends State<CropScreen> {
     return rotated > original ? 1 : 0;
   }
 
-  Future<void> _autoOrientIfNeeded(PhotoItem item, double frameAspect) async {
-    if (_autoOriented.contains(item.id)) return;
-    _autoOriented.add(item.id);
+  /// Probes a photo's orientation ONCE (cached), so both the on-screen auto-
+  /// orient and the bulk actions can await the same work. The shared
+  /// [resolveImageSize] reads only the (EXIF-oriented) dimensions at a tiny
+  /// decode size — never a full-resolution bitmap.
+  Future<void> _autoOrientIfNeeded(PhotoItem item, double frameAspect) {
+    return _orientFutures.putIfAbsent(
+        item.id, () => _probeAndOrient(item, frameAspect));
+  }
+
+  Future<void> _probeAndOrient(PhotoItem item, double frameAspect) async {
     try {
-      final size = await _resolveImageSize(item.localPath);
+      final size = await resolveImageSize(item.localPath);
       if (!mounted) return;
-      _sizes[item.id] = size;
       final best = _bestRotation(size, frameAspect);
       if (best != 0 && _rotFor(item.id) == 0) {
         setState(() {
@@ -251,64 +292,6 @@ class _CropScreenState extends State<CropScreen> {
       }
     } catch (_) {
       // If size resolution fails, fall back to no rotation — that's fine.
-    }
-  }
-
-  /// Decode width used to probe a photo's orientation. Only the W:H ratio is
-  /// needed, so a thumbnail-sized decode is plenty.
-  static const int _probeWidth = 96;
-
-  /// Reads the photo's (EXIF-oriented) pixel dimensions WITHOUT holding a
-  /// full-resolution decode. On native the encoded bytes go straight into an
-  /// [ui.ImmutableBuffer] and the codec is instantiated with a 96-px
-  /// `targetWidth`, so the JPEG decoder sub-samples and only a tiny bitmap is
-  /// ever materialised (a 12 MP photo decoded at full size is ~48 MB — doing
-  /// that for every photo while the crop viewer also held its own copy tripped
-  /// iOS's memory watchdog). On web (blob: URLs, no file path) the same
-  /// down-scaled decode goes through a [ResizeImage] provider.
-  Future<Size> _resolveImageSize(String path) async {
-    if (kIsWeb) {
-      final completer = Completer<Size>();
-      final provider = ResizeImage(NetworkImage(path), width: _probeWidth);
-      final stream = provider.resolve(const ImageConfiguration());
-      late final ImageStreamListener listener;
-      listener = ImageStreamListener(
-        (info, _) {
-          if (!completer.isCompleted) {
-            completer.complete(Size(
-              info.image.width.toDouble(),
-              info.image.height.toDouble(),
-            ));
-          }
-          stream.removeListener(listener);
-        },
-        onError: (e, _) {
-          if (!completer.isCompleted) completer.completeError(e);
-          stream.removeListener(listener);
-        },
-      );
-      stream.addListener(listener);
-      return completer.future;
-    }
-
-    ui.ImmutableBuffer? buffer;
-    ui.ImageDescriptor? descriptor;
-    ui.Codec? codec;
-    ui.FrameInfo? frame;
-    try {
-      buffer = await ui.ImmutableBuffer.fromFilePath(path);
-      descriptor = await ui.ImageDescriptor.encoded(buffer);
-      codec = await descriptor.instantiateCodec(targetWidth: _probeWidth);
-      frame = await codec.getNextFrame();
-      return Size(
-        frame.image.width.toDouble(),
-        frame.image.height.toDouble(),
-      );
-    } finally {
-      frame?.image.dispose();
-      codec?.dispose();
-      descriptor?.dispose();
-      buffer?.dispose();
     }
   }
 
@@ -334,7 +317,16 @@ class _CropScreenState extends State<CropScreen> {
 
     final rotation = _rotFor(item.id);
 
-    return Scaffold(
+    return PopScope(
+      // Android system Back must not close the app (losing the just-picked
+      // photos) when the crop screen was auto-opened from the picker. Route it
+      // through the same logic as the app-bar Back instead.
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _back();
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text('REVIEW ${_index + 1} OF $total'),
         leading: IconButton(
@@ -373,6 +365,10 @@ class _CropScreenState extends State<CropScreen> {
                                   _ctrlFor(item.id),
                               minScale: 0.5,
                               maxScale: 6,
+                              // Room to pan the photo once it's zoomed out
+                              // below 1× (and to pinch back below 1×) instead
+                              // of it locking in place.
+                              boundaryMargin: const EdgeInsets.all(160),
                               // RotatedBox swaps layout dimensions for 90°/270°
                               // rotations, so BoxFit.contain re-fits the rotated
                               // photo into the frame and minimizes white space.
@@ -443,11 +439,11 @@ class _CropScreenState extends State<CropScreen> {
                     children: [
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: _skipAll,
+                          onPressed: _skipRest,
                           icon: const Icon(
                               Icons.format_color_fill_outlined,
                               size: 18),
-                          label: const Text('Skip all',
+                          label: const Text('Skip the rest',
                               style: TextStyle(fontSize: 13)),
                           style: OutlinedButton.styleFrom(
                             padding:
@@ -459,10 +455,10 @@ class _CropScreenState extends State<CropScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: _autoCropAll,
+                          onPressed: _autoCropRest,
                           icon: const Icon(Icons.auto_fix_high_outlined,
                               size: 18),
-                          label: const Text('Auto crop',
+                          label: const Text('Auto-crop the rest',
                               style: TextStyle(fontSize: 13)),
                           style: OutlinedButton.styleFrom(
                             padding:
@@ -486,6 +482,7 @@ class _CropScreenState extends State<CropScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

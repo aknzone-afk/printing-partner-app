@@ -396,6 +396,7 @@ def verify_payment():
     except ValueError:
         return jsonify(verified=False, reason="Bad amount."), 400
     our_vpa = request.form.get("ourUpiId", "").strip()
+    our_name = request.form.get("ourName", "").strip()
     f = request.files.get("screenshot")
     if not f or not (expected > 0):   # "not >" also refuses NaN
         return jsonify(verified=False, reason="Missing screenshot or amount."), 400
@@ -454,6 +455,18 @@ def verify_payment():
             return jsonify(verified=False, amount=amount, utr=utr, payee=payee,
                            reason="This payment went to a different account. "
                            "Please scan the QR shown here and pay again.")
+    elif our_name and not vpa:
+        # No VPA on the screenshot: the payee is otherwise UNCHECKED, so a
+        # customer could have paid someone else (tester 10-Nov). Fall back to
+        # the receiver NAME — require at least two tokens of our name to appear
+        # (case-insensitive) so a screenshot that does not clearly show OUR
+        # account is rejected rather than trusted.
+        want = [t for t in our_name.lower().split() if len(t) >= 2]
+        need = min(2, len(want))
+        if need and sum(1 for t in want if t in name.lower()) < need:
+            return jsonify(verified=False, amount=amount, utr=utr, payee=payee,
+                           reason="Attach the full screenshot that clearly "
+                           "shows who you paid.")
     if not utr:
         return jsonify(verified=False, amount=amount, payee=payee,
                        reason="We couldn't read the transaction ID (UTR). Please attach "
@@ -641,6 +654,26 @@ def ingest():
                 "folder": folder,
                 "name": stem,
             })
+    # The merchant's copy of WHO the order is for. The shop used to receive only
+    # the photos — no customer name / phone / address (tester 10-Nov). Written
+    # next to the photos, length-capped, and best-effort: a failure here must
+    # never fail an order whose photos are already on disk.
+    try:
+        details = (
+            f"Order: {order_number or file_number}\n"
+            f"Name: {str(meta.get('customerName') or '')[:120]}\n"
+            f"Phone: {str(meta.get('customerPhone') or '')[:20]}\n"
+            f"Address:\n{str(meta.get('address') or '')[:500]}\n"
+            f"Photos: {len(written)}\n"
+            f"Placed: {datetime.datetime.now(IST).isoformat(timespec='seconds')}\n"
+        )
+        disk_folder = os.path.join(filer.root, folder)
+        os.makedirs(disk_folder, exist_ok=True)
+        with open(os.path.join(disk_folder, f"Order {stem} details.txt"),
+                  "w", encoding="utf-8") as _df:
+            _df.write(details)
+    except Exception as _e:   # pragma: no cover
+        app.logger.warning("ingest details write failed: %s", _e)
     return jsonify(ok=True, filed=len(written))
 
 
@@ -751,6 +784,8 @@ def dashboard():
                             f'<a href="/zip?path={q}">⬇ zip</a></li>')
             elif name.lower().endswith(".jpg"):
                 rows.append(f'<li>\U0001f5bc <a href="/file?path={q}">{shown}</a></li>')
+            elif name.lower().endswith(".txt"):
+                rows.append(f'<li>\U0001f4c4 <a href="/file?path={q}">{shown}</a></li>')
     up = ""
     if rel:
         parent = quote("/".join(rel.split("/")[:-1]))
@@ -769,8 +804,11 @@ def serve_file():
     p = _orders_path(request.args.get("path", ""))
     if not os.path.isfile(p):
         abort(404)
+    # The order details are a .txt next to the photos; everything else served
+    # here is a JPEG.
+    mime = "text/plain; charset=utf-8" if p.lower().endswith(".txt") else "image/jpeg"
     with open(p, "rb") as fh:
-        return Response(fh.read(), mimetype="image/jpeg")
+        return Response(fh.read(), mimetype=mime)
 
 
 @app.get("/zip")

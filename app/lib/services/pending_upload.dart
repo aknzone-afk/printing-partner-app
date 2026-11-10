@@ -58,6 +58,27 @@ class PendingUpload {
   final bool ingestAttempted;
   final int savedAtMs;
 
+  /// True when this record may be resumed by the checkout that is open now:
+  /// the SAME cart ([packKey] + [photoCount]) and the SAME customer.
+  ///
+  /// [uid] is the signed-in (anonymous) Firebase uid, or null when it is not
+  /// known yet. An order created under one uid cannot be finished under
+  /// another: the Firestore `orders/{orderId}` doc belongs to the first uid, so
+  /// the new one can neither update its status nor see it under My Orders.
+  /// A record or a session without a uid is not treated as a mismatch.
+  bool isFor({
+    required String? uid,
+    required String packKey,
+    required int photoCount,
+  }) {
+    if (packKey != this.packKey || photoCount != this.photoCount) return false;
+    final current = (uid ?? '').trim();
+    if (current.isNotEmpty && this.uid.isNotEmpty && current != this.uid) {
+      return false;
+    }
+    return true;
+  }
+
   PendingUpload copyWith({
     String? token,
     bool clearToken = false,

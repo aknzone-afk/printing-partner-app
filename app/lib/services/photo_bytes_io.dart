@@ -76,8 +76,13 @@ Future<Uint8List?> flattenResizeEncode(
     Uint8List bytes, int maxDim, int quality) async {
   try {
     return await Isolate.run(() {
-      final decoded = img.decodeImage(bytes);
+      var decoded = img.decodeImage(bytes);
       if (decoded == null) return null;
+      // Grey + alpha (PNG colour type 4): compositeImage does not blend a
+      // 2-channel image — transparent pixels came out BLACK. Expand to RGBA.
+      if (decoded.numChannels == 2) {
+        decoded = decoded.convert(numChannels: 4);
+      }
 
       img.Image flat = decoded;
       if (decoded.hasAlpha) {

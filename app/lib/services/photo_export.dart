@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 
@@ -18,9 +19,14 @@ import 'photo_bytes.dart';
 /// Crop semantics (what the customer saw on the crop screen is what prints):
 ///  * `rotationSteps`  → the photo is rotated 90° clockwise that many times
 ///                        (same as the crop screen's RotatedBox).
-///  * `crop != null`    → the frame the customer saved, normalised to the
-///                        rotated photo ((0,0)-(1,1) = whole photo; parts
-///                        outside 0..1 print WHITE). Pan/zoom reproduced.
+///  * `edit.hasView`    → the customer pressed Save on the crop screen: the
+///                        viewer's pan + zoom and the frame size they were
+///                        measured in are replayed against the photo's TRUE
+///                        pixel size (`cropFrameRect`), so the print shows
+///                        exactly the framed region; frame parts outside the
+///                        photo print WHITE. Needs no size probe.
+///  * `crop != null`    → an explicit frame, normalised to the rotated photo
+///                        ((0,0)-(1,1) = whole photo). Legacy edits.
 ///  * `skipped == true` → "white-pad": the whole photo is letterboxed onto a
 ///                        white canvas of the print's image aspect
 ///                        (BoxFit.contain).
@@ -66,6 +72,10 @@ Future<List<Uint8List>> renderCroppedJpegs(
   }
   final aspect = pack.size.imageAspectWxH;
   final longSide = maxLongSide ?? printLongSideFor(pack.size);
+  // The kept region (not the whole photo) should have the print budget's
+  // pixels, so the output is capped higher than the per-print [longSide] and
+  // the source is decoded larger for zoomed-in crops (see [_sourceLongSide]).
+  final outputCap = maxLongSide ?? 4000;
   final out = <Uint8List>[];
 
   // ONE photo at a time, each already bounded by the native codec, so the
@@ -75,7 +85,11 @@ Future<List<Uint8List>> renderCroppedJpegs(
     final edit = cart.cropFor(item.id) ?? const CropEdit.skipped();
     final crop = edit.crop;
 
-    final source = await _sourceBytes(item.localPath, longSide);
+    // A zoomed-in crop keeps only a FRACTION of the photo, so decode the
+    // source larger (bounded by [outputCap]) — otherwise the kept region, cut
+    // from a photo already shrunk to the print budget, prints soft.
+    final srcLongSide = _sourceLongSide(edit, longSide, outputCap);
+    final source = await _sourceBytes(item.localPath, srcLongSide);
     if (source == null || source.isEmpty) {
       throw PhotoExportException(
           'Photo ${i + 1} could not be read from your device.');
@@ -89,7 +103,15 @@ Future<List<Uint8List>> renderCroppedJpegs(
       crop: crop == null
           ? null
           : <double>[crop.left, crop.top, crop.right, crop.bottom],
-      maxLongSide: longSide,
+      view: edit.hasView
+          ? <double>[
+              edit.offsetX / edit.viewWidth,
+              edit.offsetY / edit.viewHeight,
+              edit.scale,
+            ]
+          : null,
+      maxLongSide: outputCap,
+      printLongSide: longSide,
       quality: jpegQuality,
     );
     Uint8List? jpg = await _render(job);
@@ -99,7 +121,7 @@ Future<List<Uint8List>> renderCroppedJpegs(
       // HEIC/HEIF that reached the Dart path. Transcode with the platform
       // codec (native only; null on web) and run the crop once more.
       final transcoded =
-          await compressForPrintNative(source, longSide, 95) ??
+          await compressForPrintNative(source, srcLongSide, 95) ??
               await transcodeToJpeg(source);
       if (transcoded != null && transcoded.isNotEmpty) {
         job = job.withBytes(transcoded);
@@ -124,7 +146,7 @@ Future<List<Uint8List>> renderCroppedJpegs(
 
     debugPrint('[PhotoExport] ${i + 1}/${items.length}: '
         '${result.length ~/ 1024} KB ('
-        '${crop != null ? 'crop ${crop.left.toStringAsFixed(2)},${crop.top.toStringAsFixed(2)}-${crop.right.toStringAsFixed(2)},${crop.bottom.toStringAsFixed(2)}' : edit.skipped ? 'white-pad' : 'centre-cover'}, '
+        '${edit.hasView ? 'view x${edit.scale.toStringAsFixed(2)} @${(edit.offsetX / edit.viewWidth).toStringAsFixed(2)},${(edit.offsetY / edit.viewHeight).toStringAsFixed(2)}' : crop != null ? 'crop ${crop.left.toStringAsFixed(2)},${crop.top.toStringAsFixed(2)}-${crop.right.toStringAsFixed(2)},${crop.bottom.toStringAsFixed(2)}' : edit.skipped ? 'white-pad' : 'centre-cover'}, '
         'rot ${edit.rotationSteps * 90}°, q$q)');
     out.add(result);
     onProgress?.call(i + 1, items.length);
@@ -145,6 +167,95 @@ int printLongSideFor(PrintSize size) {
   return (300 * inches * 1.5).ceil().clamp(1800, 4000);
 }
 
+/// Long side (px) to decode the SOURCE photo at for [edit]: the print budget
+/// [longSide] divided by the largest crop fraction kept, clamped to
+/// [longSide]..[cap]. A crop that keeps the whole photo decodes at [longSide]
+/// (unchanged); a 3× zoom-in decodes ~3× larger so the kept region still
+/// carries the print budget's pixels.
+int _sourceLongSide(CropEdit edit, int longSide, int cap) {
+  double frac;
+  if (edit.hasView) {
+    // The viewer shows 1/scale of the frame, so ~1/scale of the photo is kept.
+    final s = edit.scale;
+    frac = (s.isFinite && s > 0) ? 1.0 / s : 1.0;
+  } else {
+    final c = edit.crop;
+    if (c != null) {
+      final w = (c.right - c.left).abs();
+      final h = (c.bottom - c.top).abs();
+      frac = math.max(w, h);
+    } else {
+      frac = 1.0; // skipped / centre-cover: whole photo (one axis) is kept
+    }
+  }
+  if (!frac.isFinite || frac <= 0) frac = 1.0;
+  final want = longSide / math.min(frac, 1.0);
+  return want.clamp(longSide.toDouble(), cap.toDouble()).round();
+}
+
+/// Decodes only the DIMENSIONS of [path] at a tiny size — an orientation probe
+/// (crop screen) and a validity check (reject corrupt photos before payment).
+/// Native: a bounded codec straight from the file path (the full photo never
+/// enters Dart memory). Web: a down-scaled [ResizeImage] over the URL. Throws
+/// when the image cannot be read or decoded.
+Future<ui.Size> resolveImageSize(String path, {int probeWidth = 96}) async {
+  if (kIsWeb) {
+    final completer = Completer<ui.Size>();
+    final provider = ResizeImage(NetworkImage(path), width: probeWidth);
+    final stream = provider.resolve(const ImageConfiguration());
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (info, _) {
+        if (!completer.isCompleted) {
+          completer.complete(ui.Size(
+            info.image.width.toDouble(),
+            info.image.height.toDouble(),
+          ));
+        }
+        stream.removeListener(listener);
+      },
+      onError: (e, _) {
+        if (!completer.isCompleted) completer.completeError(e);
+        stream.removeListener(listener);
+      },
+    );
+    stream.addListener(listener);
+    return completer.future;
+  }
+
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? descriptor;
+  ui.Codec? codec;
+  ui.FrameInfo? frame;
+  try {
+    buffer = await ui.ImmutableBuffer.fromFilePath(path);
+    descriptor = await ui.ImageDescriptor.encoded(buffer);
+    codec = await descriptor.instantiateCodec(targetWidth: probeWidth);
+    frame = await codec.getNextFrame();
+    return ui.Size(
+      frame.image.width.toDouble(),
+      frame.image.height.toDouble(),
+    );
+  } finally {
+    frame?.image.dispose();
+    codec?.dispose();
+    descriptor?.dispose();
+    buffer?.dispose();
+  }
+}
+
+/// True when [path] decodes to a valid, non-empty image; false on any failure.
+/// Used to reject corrupt / unreadable photos BEFORE the customer pays, rather
+/// than failing the whole order AFTER payment at render time.
+Future<bool> canDecodeImage(String path) async {
+  try {
+    final s = await resolveImageSize(path);
+    return s.width > 0 && s.height > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Thrown when a photo cannot be rendered; the message is customer-facing.
 class PhotoExportException implements Exception {
   const PhotoExportException(this.message);
@@ -162,7 +273,9 @@ class _RenderJob {
     required this.skipped,
     required this.rotationSteps,
     required this.crop,
+    required this.view,
     required this.maxLongSide,
+    required this.printLongSide,
     required this.quality,
   });
 
@@ -171,7 +284,18 @@ class _RenderJob {
   final bool skipped;
   final int rotationSteps; // 90° clockwise turns, 0..3
   final List<double>? crop; // [left, top, right, bottom], normalised
+  /// Crop-screen viewer state: [offsetX / frameW, offsetY / frameH, scale].
+  final List<double>? view;
+
+  /// Upper bound for the SOURCE decode + the intermediate canvas, so a
+  /// zoomed-in crop can carry enough pixels and memory stays bounded (≥
+  /// [printLongSide]).
   final int maxLongSide;
+
+  /// The print's pixel budget: the FINAL output's longest side is capped here
+  /// (never upscaled). The kept region is sized for the print, not for the
+  /// larger source [maxLongSide] it was cut from.
+  final int printLongSide;
   final int quality;
 
   _RenderJob withBytes(Uint8List b) => _RenderJob(
@@ -180,7 +304,9 @@ class _RenderJob {
         skipped: skipped,
         rotationSteps: rotationSteps,
         crop: crop,
+        view: view,
         maxLongSide: maxLongSide,
+        printLongSide: printLongSide,
         quality: quality,
       );
 
@@ -190,7 +316,9 @@ class _RenderJob {
         skipped: skipped,
         rotationSteps: rotationSteps,
         crop: crop,
+        view: view,
         maxLongSide: maxLongSide,
+        printLongSide: printLongSide,
         quality: q,
       );
 }
@@ -258,10 +386,22 @@ bool _mayHaveAlpha(Uint8List b) {
 }
 
 /// The crop rect ([left, top, right, bottom], normalised to the rotated
-/// photo of [w]×[h]) every edit reduces to: the saved frame, else BoxFit
-/// contain (skipped) or BoxFit cover (legacy cropped) of the target aspect.
-List<double> _effectiveCrop(
-    int w, int h, double aspect, bool skipped, List<double>? crop) {
+/// photo of [w]×[h]) every edit reduces to: the frame the customer saved on
+/// the crop screen (viewer state replayed on the TRUE photo size), else an
+/// explicit legacy frame, else BoxFit contain (skipped) or BoxFit cover
+/// ("Auto crop") of the target aspect.
+List<double> _effectiveCrop(int w, int h, double aspect, bool skipped,
+    List<double>? crop, List<double>? view) {
+  if (!skipped && view != null && view.length == 3) {
+    final framed = cropFrameRect(
+      frameAspect: aspect,
+      photoAspect: w / h,
+      scale: view[2],
+      fx: view[0],
+      fy: view[1],
+    );
+    if (framed != null) return framed;
+  }
   if (crop != null && crop.length == 4) return crop;
   final srcAspect = w / h;
   if (skipped) {
@@ -307,6 +447,12 @@ Uint8List? _renderOne(_RenderJob job) {
   }
 
   // Transparent stickers / PNG graphics must land on WHITE, never black.
+  // A 2-channel image is grey + alpha (PNG colour type 4: black-and-white
+  // stickers, logos, signatures). compositeImage does not blend that layout —
+  // it painted the transparent pixels BLACK — so expand it to RGBA first.
+  if (image.numChannels == 2) {
+    image = image.convert(numChannels: 4);
+  }
   if (image.hasAlpha) {
     final flat =
         img.Image(width: image.width, height: image.height, numChannels: 3);
@@ -324,34 +470,42 @@ Uint8List? _renderOne(_RenderJob job) {
         angle: 90 * turns, interpolation: img.Interpolation.nearest);
   }
 
-  final rect =
-      _effectiveCrop(image.width, image.height, job.aspect, job.skipped, job.crop);
+  final rect = _effectiveCrop(image.width, image.height, job.aspect,
+      job.skipped, job.crop, job.view);
 
   // If the frame (which may extend into white margin) would be larger than
   // the output budget, shrink the SOURCE first so the canvas is never huge
   // (a zoomed-out crop of a 4000 px photo could otherwise be 8000 px).
-  var cw = ((rect[2] - rect[0]) * image.width).round();
-  var ch = ((rect[3] - rect[1]) * image.height).round();
-  final longest = math.max(cw, ch);
+  // The frame's size in source pixels, UNROUNDED: where the frame is white
+  // padding, the canvas is sized from this (see _applyCrop) so it keeps the
+  // exact print aspect however small the shrunken photo gets.
+  final frameW = (rect[2] - rect[0]) * image.width;
+  final frameH = (rect[3] - rect[1]) * image.height;
+  final longest = math.max(frameW.round(), frameH.round());
+  var f = 1.0;
   if (longest > job.maxLongSide && longest > 0) {
-    final f = job.maxLongSide / longest;
+    f = job.maxLongSide / longest;
     image = img.copyResize(image,
         width: math.max(1, (image.width * f).round()),
         height: math.max(1, (image.height * f).round()),
         interpolation: img.Interpolation.cubic);
   }
 
-  image = _applyCrop(image, rect);
+  image = _applyCrop(image, rect,
+      targetW: math.max(1, (frameW * f).round()),
+      targetH: math.max(1, (frameH * f).round()));
 
-  // Cap the longest side (never upscale) — keeps every file well inside the
-  // backend's 12 MB per-photo limit while preserving print detail.
+  // Cap the longest side at the PRINT budget (never upscale) — the kept region
+  // is sized for the print, not for the larger source it was cut from. Keeps
+  // every file well inside the backend's 12 MB per-photo limit while preserving
+  // print detail.
   final outLongest = math.max(image.width, image.height);
-  if (outLongest > job.maxLongSide) {
+  if (outLongest > job.printLongSide) {
     image = image.width >= image.height
         ? img.copyResize(image,
-            width: job.maxLongSide, interpolation: img.Interpolation.cubic)
+            width: job.printLongSide, interpolation: img.Interpolation.cubic)
         : img.copyResize(image,
-            height: job.maxLongSide, interpolation: img.Interpolation.cubic);
+            height: job.printLongSide, interpolation: img.Interpolation.cubic);
   }
 
   return Uint8List.fromList(img.encodeJpg(image, quality: job.quality));
@@ -359,13 +513,25 @@ Uint8List? _renderOne(_RenderJob job) {
 
 /// Crops [image] to [rect] (normalised, may extend past the photo): the part
 /// outside the photo is WHITE, exactly like the crop screen's white frame.
-img.Image _applyCrop(img.Image image, List<double> rect) {
+///
+/// [targetW] x [targetH] is the frame's true size in this image's pixels. On
+/// an axis where the frame reaches past the photo (white padding) the canvas
+/// takes exactly that length: deriving it from the photo's ROUNDED pixel size
+/// multiplies the rounding by the padding ratio (a white-padded 4000x400
+/// panorama shrunk to 667x67 came out 664x1000 instead of 667x1000). On an
+/// axis where the frame is inside the photo nothing changes.
+img.Image _applyCrop(img.Image image, List<double> rect,
+    {int targetW = 0, int targetH = 0}) {
   final w = image.width;
   final h = image.height;
-  final x0 = (rect[0] * w).round();
-  final y0 = (rect[1] * h).round();
-  final x1 = (rect[2] * w).round();
-  final y1 = (rect[3] * h).round();
+  final xs =
+      _fitPadded((rect[0] * w).round(), (rect[2] * w).round(), w, targetW);
+  final ys =
+      _fitPadded((rect[1] * h).round(), (rect[3] * h).round(), h, targetH);
+  final x0 = xs[0];
+  final x1 = xs[1];
+  final y0 = ys[0];
+  final y1 = ys[1];
   final cw = x1 - x0;
   final ch = y1 - y0;
   if (cw < 1 || ch < 1) return image; // degenerate rect: print as-is
@@ -392,6 +558,23 @@ img.Image _applyCrop(img.Image image, List<double> rect) {
     img.compositeImage(canvas, piece, dstX: sx - x0, dstY: sy - y0);
   }
   return canvas;
+}
+
+/// One axis of [_applyCrop]: the frame spans [a]..[b] over a photo side of
+/// [size] px. If it reaches past the photo, move the PADDED end(s) so the span
+/// is exactly [target] px (keeping the photo centred when both ends are
+/// padded); an end that lies inside the photo is never moved.
+List<int> _fitPadded(int a, int b, int size, int target) {
+  if (target < 1 || b - a == target) return <int>[a, b];
+  final padBefore = a < 0;
+  final padAfter = b > size;
+  if (padBefore && padAfter) {
+    final start = math.min(0, a - (target - (b - a)) ~/ 2);
+    return <int>[start, start + target];
+  }
+  if (padAfter) return <int>[a, a + target];
+  if (padBefore) return <int>[b - target, b];
+  return <int>[a, b];
 }
 
 /// Web renderer: browser codec (bounded, async, EXIF applied) → ui.Canvas
@@ -425,14 +608,17 @@ Future<Uint8List?> _renderOneWeb(_RenderJob job) async {
     final odd = turns.isOdd;
     final rw = odd ? ih : iw; // rotated size
     final rh = odd ? iw : ih;
-    final rect = _effectiveCrop(rw, rh, job.aspect, job.skipped, job.crop);
+    final rect = _effectiveCrop(
+        rw, rh, job.aspect, job.skipped, job.crop, job.view);
     final x0 = rect[0] * rw;
     final y0 = rect[1] * rh;
     final cw = (rect[2] - rect[0]) * rw;
     final ch = (rect[3] - rect[1]) * rh;
     if (cw < 1 || ch < 1) return null;
-    final f = math.max(cw, ch) > job.maxLongSide
-        ? job.maxLongSide / math.max(cw, ch)
+    // Output capped at the PRINT budget (never upscaled); the decode above is
+    // allowed to be larger (job.maxLongSide) so a zoomed-in crop stays sharp.
+    final f = math.max(cw, ch) > job.printLongSide
+        ? job.printLongSide / math.max(cw, ch)
         : 1.0;
     final outW = math.max(1, (cw * f).round());
     final outH = math.max(1, (ch * f).round());
