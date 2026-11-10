@@ -122,6 +122,29 @@ class _PhotoGrid extends StatelessWidget {
   const _PhotoGrid({required this.cart});
   final Cart cart;
 
+  Future<void> _confirmClearAll(BuildContext context, Cart cart) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear all photos?'),
+        content: Text(
+            'This removes all ${cart.items.length} photos from your cart. '
+            'Your pack stays selected so you can add new ones.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep them')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Clear all'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) cart.clearPhotos();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (cart.isEmpty) {
@@ -162,13 +185,22 @@ class _PhotoGrid extends StatelessWidget {
                     fontSize: 14, fontWeight: FontWeight.w700),
               ),
             ),
-            Tooltip(
-              message: 'Add or remove photos',
-              child: TextButton.icon(
-                onPressed: () => context.push('/photos'),
-                icon: const Icon(Icons.edit_outlined, size: 16),
-                label: const Text('Edit'),
-              ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextButton.icon(
+                  onPressed: () => context.push('/photos'),
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
+                  label: const Text('Add photos'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _confirmClearAll(context, cart),
+                  icon: const Icon(Icons.delete_outline_rounded, size: 16),
+                  label: const Text('Clear all'),
+                  style: TextButton.styleFrom(
+                      foregroundColor: AppColors.error),
+                ),
+              ],
             ),
           ],
         ),
@@ -203,35 +235,6 @@ class _PhotoGrid extends StatelessWidget {
                         fit: (edit != null && edit.skipped)
                             ? BoxFit.contain
                             : BoxFit.cover,
-                      ),
-                    ),
-                  ),
-                  // Edit hint overlay (bottom-left)
-                  Positioned(
-                    bottom: 4,
-                    left: 4,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.tune_rounded,
-                              color: Colors.white, size: 11),
-                          SizedBox(width: 3),
-                          Text(
-                            'Edit',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
                       ),
                     ),
                   ),

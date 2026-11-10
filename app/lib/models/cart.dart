@@ -183,6 +183,17 @@ class Cart extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Remove every photo but KEEP the chosen pack — for the cart "Clear all".
+  void clearPhotos() {
+    _items.clear();
+    _edits.clear();
+    _pdfBytes = null;
+    _pdfProgress = 0.0;
+    _pdfStage = '';
+    _persist();
+    notifyListeners();
+  }
+
   int get subtotalPaise {
     // If a pack is active, the price is the pack's flat price (regardless of
     // how many of the picked photos repeat — user picks N photos to fill the
