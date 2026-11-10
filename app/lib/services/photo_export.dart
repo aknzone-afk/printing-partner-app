@@ -61,6 +61,7 @@ Future<List<Uint8List>> renderCroppedJpegs(
   int? maxLongSide,
   int jpegQuality = 88,
   int maxBytes = 11 * 1024 * 1024,
+  int concurrency = 3,
 }) async {
   final pack = cart.selectedPack;
   if (pack == null) {
@@ -76,85 +77,135 @@ Future<List<Uint8List>> renderCroppedJpegs(
   // pixels, so the output is capped higher than the per-print [longSide] and
   // the source is decoded larger for zoomed-in crops (see [_sourceLongSide]).
   final outputCap = maxLongSide ?? 4000;
-  final out = <Uint8List>[];
 
-  // ONE photo at a time, each already bounded by the native codec, so the
-  // worker isolate holds at most one small decode + its crop.
-  for (var i = 0; i < items.length; i++) {
-    final item = items[i];
-    final edit = cart.cropFor(item.id) ?? const CropEdit.skipped();
-    final crop = edit.crop;
+  // Resolve each photo's edit once (no CropEdit at all = white-pad).
+  final edits = <CropEdit>[
+    for (final item in items) cart.cropFor(item.id) ?? const CropEdit.skipped()
+  ];
 
-    // A zoomed-in crop keeps only a FRACTION of the photo, so decode the
-    // source larger (bounded by [outputCap]) — otherwise the kept region, cut
-    // from a photo already shrunk to the print budget, prints soft.
-    final srcLongSide = _sourceLongSide(edit, longSide, outputCap);
-    final source = await _sourceBytes(item.localPath, srcLongSide);
-    if (source == null || source.isEmpty) {
-      throw PhotoExportException(
-          'Photo ${i + 1} could not be read from your device.');
+  // A BOUNDED worker pool renders photos CONCURRENTLY. One photo at a time (a
+  // single `compute` isolate) left the other CPU cores idle, so a 30–50 photo
+  // pack was N single-core renders back to back; 2–4 in flight roughly halves
+  // wall time on the multi-core phones the app runs on. Each worker still
+  // bounds its OWN source to the print budget before decoding, so peak memory
+  // is at most [concurrency] bounded photos — never the whole order — which is
+  // what keeps the iOS memory watchdog from killing the app. Results are
+  // written BY INDEX so the backend still receives them in cart order, and a
+  // failure on ANY photo fails the whole export (never a short order): the
+  // other workers drain the queue, then `Future.wait` rethrows the first error.
+  final n = math.max(1, math.min(concurrency, items.length));
+  final results = List<Uint8List?>.filled(items.length, null);
+  var next = 0;
+  var done = 0;
+
+  // Dart is single-threaded between awaits, so `next++` / `++done` never race:
+  // the increment and the lookup run with no other worker interleaved.
+  Future<void> worker() async {
+    while (true) {
+      final i = next++;
+      if (i >= items.length) break;
+      results[i] = await _renderItem(
+        items[i].localPath,
+        edits[i],
+        i,
+        total: items.length,
+        aspect: aspect,
+        longSide: longSide,
+        outputCap: outputCap,
+        jpegQuality: jpegQuality,
+        maxBytes: maxBytes,
+      );
+      // Monotonic 1..n in COMPLETION order (not index order), so the checkout
+      // progress label still counts up smoothly across the pool.
+      onProgress?.call(++done, items.length);
     }
-
-    var job = _RenderJob(
-      bytes: source,
-      aspect: aspect,
-      skipped: edit.skipped,
-      rotationSteps: edit.rotationSteps,
-      crop: crop == null
-          ? null
-          : <double>[crop.left, crop.top, crop.right, crop.bottom],
-      view: edit.hasView
-          ? <double>[
-              edit.offsetX / edit.viewWidth,
-              edit.offsetY / edit.viewHeight,
-              edit.scale,
-            ]
-          : null,
-      maxLongSide: outputCap,
-      printLongSide: longSide,
-      quality: jpegQuality,
-    );
-    Uint8List? jpg = await _render(job);
-
-    if (jpg == null) {
-      // Neither decoder could read this format — almost always an iPhone
-      // HEIC/HEIF that reached the Dart path. Transcode with the platform
-      // codec (native only; null on web) and run the crop once more.
-      final transcoded =
-          await compressForPrintNative(source, srcLongSide, 95) ??
-              await transcodeToJpeg(source);
-      if (transcoded != null && transcoded.isNotEmpty) {
-        job = job.withBytes(transcoded);
-        jpg = await _render(job);
-      }
-    }
-    if (jpg == null) {
-      throw PhotoExportException(
-          'Photo ${i + 1} is in a format we could not read. Please replace it.');
-    }
-
-    // Byte cap: step the quality down until the file fits. The server's
-    // per-photo 413 must never be reachable with bytes a retry re-sends.
-    var result = jpg;
-    var q = jpegQuality;
-    while (result.length > maxBytes && q > 50) {
-      q -= 12;
-      final smaller = await _render(job.withQuality(q));
-      if (smaller == null) break;
-      result = smaller;
-    }
-
-    debugPrint('[PhotoExport] ${i + 1}/${items.length}: '
-        '${result.length ~/ 1024} KB ('
-        '${edit.hasView ? 'view x${edit.scale.toStringAsFixed(2)} @${(edit.offsetX / edit.viewWidth).toStringAsFixed(2)},${(edit.offsetY / edit.viewHeight).toStringAsFixed(2)}' : crop != null ? 'crop ${crop.left.toStringAsFixed(2)},${crop.top.toStringAsFixed(2)}-${crop.right.toStringAsFixed(2)},${crop.bottom.toStringAsFixed(2)}' : edit.skipped ? 'white-pad' : 'centre-cover'}, '
-        'rot ${edit.rotationSteps * 90}°, q$q)');
-    out.add(result);
-    onProgress?.call(i + 1, items.length);
-    // Let the progress label paint between photos (matters on web, where the
-    // JPEG encode shares the UI thread).
-    await Future<void>.delayed(Duration.zero);
   }
-  return out;
+
+  await Future.wait(<Future<void>>[for (var w = 0; w < n; w++) worker()]);
+  return results.cast<Uint8List>();
+}
+
+/// Renders ONE cart photo to a print-ready JPEG: bound the source to the print
+/// budget, run the crop (native transcode fallback for HEIC), then step the
+/// quality down until the file fits [maxBytes]. Throws a customer-facing
+/// [PhotoExportException] naming "Photo ${index + 1}" on any failure, so a bad
+/// photo surfaces by name rather than silently shortening the order.
+Future<Uint8List> _renderItem(
+  String localPath,
+  CropEdit edit,
+  int index, {
+  required int total,
+  required double aspect,
+  required int longSide,
+  required int outputCap,
+  required int jpegQuality,
+  required int maxBytes,
+}) async {
+  final crop = edit.crop;
+
+  // A zoomed-in crop keeps only a FRACTION of the photo, so decode the source
+  // larger (bounded by [outputCap]) — otherwise the kept region, cut from a
+  // photo already shrunk to the print budget, prints soft.
+  final srcLongSide = _sourceLongSide(edit, longSide, outputCap);
+  final source = await _sourceBytes(localPath, srcLongSide);
+  if (source == null || source.isEmpty) {
+    throw PhotoExportException(
+        'Photo ${index + 1} could not be read from your device.');
+  }
+
+  var job = _RenderJob(
+    bytes: source,
+    aspect: aspect,
+    skipped: edit.skipped,
+    rotationSteps: edit.rotationSteps,
+    crop: crop == null
+        ? null
+        : <double>[crop.left, crop.top, crop.right, crop.bottom],
+    view: edit.hasView
+        ? <double>[
+            edit.offsetX / edit.viewWidth,
+            edit.offsetY / edit.viewHeight,
+            edit.scale,
+          ]
+        : null,
+    maxLongSide: outputCap,
+    printLongSide: longSide,
+    quality: jpegQuality,
+  );
+  Uint8List? jpg = await _render(job);
+
+  if (jpg == null) {
+    // Neither decoder could read this format — almost always an iPhone
+    // HEIC/HEIF that reached the Dart path. Transcode with the platform
+    // codec (native only; null on web) and run the crop once more.
+    final transcoded = await compressForPrintNative(source, srcLongSide, 95) ??
+        await transcodeToJpeg(source);
+    if (transcoded != null && transcoded.isNotEmpty) {
+      job = job.withBytes(transcoded);
+      jpg = await _render(job);
+    }
+  }
+  if (jpg == null) {
+    throw PhotoExportException(
+        'Photo ${index + 1} is in a format we could not read. Please replace it.');
+  }
+
+  // Byte cap: step the quality down until the file fits. The server's
+  // per-photo 413 must never be reachable with bytes a retry re-sends.
+  var result = jpg;
+  var q = jpegQuality;
+  while (result.length > maxBytes && q > 50) {
+    q -= 12;
+    final smaller = await _render(job.withQuality(q));
+    if (smaller == null) break;
+    result = smaller;
+  }
+
+  debugPrint('[PhotoExport] ${index + 1}/$total: '
+      '${result.length ~/ 1024} KB ('
+      '${edit.hasView ? 'view x${edit.scale.toStringAsFixed(2)} @${(edit.offsetX / edit.viewWidth).toStringAsFixed(2)},${(edit.offsetY / edit.viewHeight).toStringAsFixed(2)}' : crop != null ? 'crop ${crop.left.toStringAsFixed(2)},${crop.top.toStringAsFixed(2)}-${crop.right.toStringAsFixed(2)},${crop.bottom.toStringAsFixed(2)}' : edit.skipped ? 'white-pad' : 'centre-cover'}, '
+      'rot ${edit.rotationSteps * 90}°, q$q)');
+  return result;
 }
 
 /// Longest-side pixel budget for a photo printed into [size]'s image area:
@@ -508,7 +559,14 @@ Uint8List? _renderOne(_RenderJob job) {
             height: job.printLongSide, interpolation: img.Interpolation.cubic);
   }
 
-  return Uint8List.fromList(img.encodeJpg(image, quality: job.quality));
+  // 4:4:4 chroma (no subsampling): the crop can land a saturated complementary
+  // edge (red/green, blue/yellow) on an output pixel, and 4:2:0's chroma average
+  // there overshoots to near-WHITE — a visible print artefact the cover-crop
+  // tests catch. Phone photos are soft-edged, but graphics/text that reach this
+  // path are not, so the encode stays 4:4:4 rather than trade that edge quality
+  // for a faster encode. (The sticker/PNG path in photo_bytes_io is 4:4:4 too.)
+  return Uint8List.fromList(
+      img.encodeJpg(image, quality: job.quality, chroma: img.JpegChroma.yuv444));
 }
 
 /// Crops [image] to [rect] (normalised, may extend past the photo): the part

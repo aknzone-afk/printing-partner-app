@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -96,6 +98,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// Rendered cropped JPEGs, cached so a Retry re-runs ONLY the upload.
   List<Uint8List>? _renderedJpgs;
 
+  /// The photo render started in the BACKGROUND the moment this screen opened,
+  /// so tapping Pay waits on an already-running (often finished) render instead
+  /// of starting a cold one — the committed step becomes ~upload only. Keyed by
+  /// [_renderSignature]; if the cart's photos/crops/pack change, the signature
+  /// no longer matches and the upload falls back to a fresh render.
+  Future<List<Uint8List>>? _renderFuture;
+  String? _renderSignature;
+
   /// Upload reached a terminal state: a network/server failure that can be
   /// retried, or a real 402/409 rejection that must NOT be retried.
   bool _uploadFailed = false;
@@ -108,7 +118,62 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       _checkHealth();
       _loadPrice();
       _restorePending();
+      // Render the photos NOW, while the customer reads the QR / pays, so the
+      // "Preparing photos" step is already done (or nearly) by the time they
+      // attach the screenshot. Pure optimisation — _uploadToBackend falls back
+      // to a cold render if this is missing or stale.
+      _startPrerender();
     });
+  }
+
+  /// A fingerprint of everything the render depends on: the pack and each
+  /// photo's path + crop. The pre-rendered JPEGs are valid only while this is
+  /// unchanged; a new photo set, a re-crop or a pack change makes it differ and
+  /// the stale pre-render is ignored.
+  String _renderSig(Cart cart) {
+    final pack = cart.selectedPack;
+    final b = StringBuffer()
+      ..write(pack == null ? '-' : _packKey(pack))
+      ..write('#');
+    for (final item in cart.items) {
+      final e = cart.cropFor(item.id);
+      b
+        ..write(item.id)
+        ..write('@')
+        ..write(item.localPath)
+        ..write('~')
+        ..write(e == null ? 'none' : jsonEncode(e.toJson()))
+        ..write(';');
+    }
+    return b.toString();
+  }
+
+  /// Kick off the photo render in the background. No-ops while an order is
+  /// placing / resuming, when the cart is empty, or when a render for the
+  /// current cart already exists. Any error is caught HERE so an unawaited
+  /// pre-render never crashes the isolate — the real upload awaits the same
+  /// future and surfaces the error through the normal flow.
+  void _startPrerender() {
+    if (!mounted || _busy || _placedOrderId != null) return;
+    final cart = context.read<Cart>();
+    if (cart.selectedPack == null || cart.isEmpty) return;
+    final sig = _renderSig(cart);
+    if (_renderSignature == sig &&
+        (_renderedJpgs != null || _renderFuture != null)) {
+      return; // already rendered / rendering this exact cart
+    }
+    _renderSignature = sig;
+    _renderedJpgs = null;
+    final future = renderCroppedJpegs(cart);
+    _renderFuture = future;
+    // Register a handler so an early failure is not reported as an unhandled
+    // async error; the awaiter in _uploadToBackend gets the same result/error.
+    future.then(
+      (jpgs) {
+        if (mounted && _renderSignature == sig) _renderedJpgs = jpgs;
+      },
+      onError: (Object _) {},
+    );
   }
 
   /// Ask the backend whether it can actually take a payment right now (server
@@ -470,13 +535,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               'Your photos are no longer in the cart on this device.');
         }
         final total = cart.itemCount;
-        _setStage('Preparing photo 1 of $total…');
-        final jpgs = await renderCroppedJpegs(
-          cart,
-          onProgress: (done, t) {
-            if (done < t) _setStage('Preparing photo ${done + 1} of $t…');
-          },
-        );
+        // Reuse the background pre-render if it is for THIS exact cart;
+        // otherwise render cold with the per-photo progress label.
+        final pending = (_renderFuture != null &&
+                _renderSignature == _renderSig(cart))
+            ? _renderFuture!
+            : null;
+        final List<Uint8List> jpgs;
+        if (pending != null) {
+          _setStage('Preparing your photos ($total)…');
+          jpgs = await pending;
+        } else {
+          _setStage('Preparing photo 1 of $total…');
+          jpgs = await renderCroppedJpegs(
+            cart,
+            onProgress: (done, t) {
+              if (done < t) _setStage('Preparing photo ${done + 1} of $t…');
+            },
+          );
+        }
         if (!mounted) return;
         _renderedJpgs = jpgs;
       }
