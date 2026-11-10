@@ -68,6 +68,9 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
           themeColor: AppColors.primary,
           gridCount: 4,
           pageSize: 80,
+          // Tap a photo = select it instantly (no full-screen preview step),
+          // so picking many photos is just tap, tap, tap, then Done.
+          specialPickerType: SpecialPickerType.noPreview,
         ),
       );
       if (!mounted) return;
