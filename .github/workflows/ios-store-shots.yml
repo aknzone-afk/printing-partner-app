@@ -1,0 +1,108 @@
+# App Store screenshots on an iPhone Pro Max SIMULATOR (reliable — the Android
+# emulator won't boot on GitHub runners). Boots the sim, walks the customer flow
+# (integration_test/review_flow_test.dart, which pauses on each screen) and
+# captures a simctl screenshot every ~1.5s. Upload artifact = a set of PNGs at
+# the 6.9"/6.7" App Store size; pick the best ones for the listing.
+# Started by hand only (macOS minutes are costly).
+name: iOS store screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shots:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 26
+        run: |
+          if [ -d /Applications/Xcode_26.6.app ]; then sudo xcode-select -s /Applications/Xcode_26.6.app; fi
+          xcodebuild -version
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.41.9
+          cache: true
+
+      - name: Flutter dependencies
+        working-directory: app
+        run: |
+          flutter config --no-analytics --no-enable-swift-package-manager
+          flutter pub get
+          flutter precache --ios
+
+      - name: Set up Ruby + gems (cocoapods)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: app/ios
+
+      - name: Install pods
+        working-directory: app/ios
+        run: bundle exec pod install --repo-update
+
+      - name: Boot an iPhone Pro Max simulator (6.9" / 6.7" store size)
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          rts=sorted([r for r in d if "iOS" in r], key=lambda r:[int(x) for x in r.split("iOS-")[1].split("-")])
+          for rt in reversed(rts):
+              pm=[x for x in d[rt] if x["name"].startswith("iPhone") and "Pro Max" in x["name"]]
+              if pm: print(pm[-1]["udid"]); break
+          else:
+              for rt in reversed(rts):
+                  ph=[x for x in d[rt] if x["name"].startswith("iPhone")]
+                  if ph: print(ph[-1]["udid"]); break')
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+          xcrun simctl list devices | grep "$UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4 || true
+
+      - name: Build the app for the simulator first
+        working-directory: app
+        run: flutter build ios --simulator --debug --no-codesign
+
+      - name: Walk the flow and capture screenshots
+        working-directory: app
+        run: |
+          UDID=${{ steps.sim.outputs.udid }}
+          mkdir -p ../out
+          # Capture a screenshot every 1.5s in the background while the flow test
+          # navigates and pauses on each screen.
+          ( i=0; while true; do
+              printf -v n "%03d" "$i"
+              xcrun simctl io "$UDID" screenshot --type=png "../out/shot_$n.png" >/dev/null 2>&1 || true
+              i=$((i+1)); sleep 1.5
+            done ) &
+          CAP=$!
+          flutter test integration_test/review_flow_test.dart -d "$UDID" 2>&1 | tee ../out/test.log || true
+          sleep 2
+          kill "$CAP" 2>/dev/null || true
+          # Drop exact-duplicate frames (screen held still) to cut the set down.
+          cd ../out
+          python3 - <<'PY'
+          import hashlib, os, glob
+          seen=set()
+          for f in sorted(glob.glob("shot_*.png")):
+              h=hashlib.md5(open(f,"rb").read()).hexdigest()
+              if h in seen: os.remove(f)
+              else: seen.add(h)
+          print("unique screenshots:", len(seen))
+          PY
+          ls -la
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: printing-partner-store-shots
+          path: out/
