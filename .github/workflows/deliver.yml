@@ -1,0 +1,43 @@
+# Push the App Store listing (metadata + screenshots) to App Store Connect and
+# submit the latest TestFlight build for review. deliver is API-only, so this
+# runs on cheap Linux (no Mac needed). Started by hand.
+#   SUBMIT_FOR_REVIEW=true  → also submits for review (set via the dispatch input)
+name: App Store deliver
+
+on:
+  workflow_dispatch:
+    inputs:
+      submit:
+        description: "Submit for review after uploading (true/false)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/ios
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: app/ios
+
+      - name: fastlane release (deliver)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          SUBMIT_FOR_REVIEW: ${{ github.event.inputs.submit }}
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: bundle exec fastlane release
