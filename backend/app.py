@@ -838,5 +838,82 @@ def serve_zip():
                              f"filename*=UTF-8''{quote(label, safe='')}.zip"})
 
 
+# ------------------------------------------------------- legal / support pages
+# Apple and Google require a public privacy-policy URL (and a support URL) for
+# the store listing. Served here so they are live at HTTPS with zero extra infra.
+_PAGE_CSS = (
+    "body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;"
+    "max-width:720px;margin:32px auto;padding:0 18px;color:#1a1f36;line-height:1.6}"
+    "h1{font-size:24px}h2{font-size:18px;margin-top:28px}"
+    "a{color:#5B4FE9}small{color:#667}"
+)
+
+_PRIVACY_HTML = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Printing Partner — Privacy Policy</title><style>{_PAGE_CSS}</style></head><body>
+<h1>Printing Partner — Privacy Policy</h1>
+<p><small>Last updated: November 2026</small></p>
+<p>Printing Partner ("we", "the app") prints the photos you choose and delivers
+them to you. This policy explains what we collect and why. We keep it simple: we
+only use your information to make and deliver your order.</p>
+<h2>What we collect</h2>
+<ul>
+<li><b>Photos you select</b> — used only to print your order. They are sent to our
+printing server, printed, and removed after the order is fulfilled.</li>
+<li><b>Delivery details</b> — your name, mobile number and address, used only to
+deliver your order and contact you about it.</li>
+<li><b>Payment screenshot</b> — the UPI payment screenshot you attach is read only
+to confirm your payment amount and reference. We do not store card or bank
+credentials; payment happens entirely inside your own UPI app.</li>
+</ul>
+<h2>What we do NOT do</h2>
+<ul>
+<li>We do not sell or share your information with advertisers.</li>
+<li>We do not track you across other apps or websites.</li>
+<li>We do not require an account, login or password.</li>
+</ul>
+<h2>How it is stored</h2>
+<p>Your order photos and details are stored on our own private server and used
+only to produce and deliver your order, then removed on a routine schedule.</p>
+<h2>Your choices</h2>
+<p>To have your data or a past order removed, contact us (see the support page).
+You can delete photos from your own device at any time.</p>
+<h2>Children</h2>
+<p>Printing Partner is a general-audience printing service and is not directed at
+children under 13.</p>
+<h2>Contact</h2>
+<p>Questions about this policy? See <a href="/support">our support page</a>.</p>
+</body></html>"""
+
+_SUPPORT_HTML = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Printing Partner — Support</title><style>{_PAGE_CSS}</style></head><body>
+<h1>Printing Partner — Support</h1>
+<p>Need help with an order? We're happy to help.</p>
+<h2>How to reach us</h2>
+<p>Use the in-app chat on your order, or contact the shop directly. Please keep
+your order number handy so we can find it quickly.</p>
+<h2>Common questions</h2>
+<ul>
+<li><b>How do I pay?</b> Scan the QR on the payment screen with any UPI app, or tap
+a UPI app button to pay directly, then attach the "payment successful" screenshot.</li>
+<li><b>How long does delivery take?</b> Typically 3–5 days from order.</li>
+<li><b>Can I change or cancel an order?</b> Contact us as soon as possible and we
+will do our best before it goes to print.</li>
+</ul>
+<p><small>Printing Partner</small></p>
+</body></html>"""
+
+
+@app.get("/privacy")
+def privacy():
+    return Response(_PRIVACY_HTML, mimetype="text/html")
+
+
+@app.get("/support")
+def support():
+    return Response(_SUPPORT_HTML, mimetype="text/html")
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
