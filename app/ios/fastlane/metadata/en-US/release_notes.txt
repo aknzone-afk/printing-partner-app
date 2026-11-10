@@ -1,2 +1,1 @@
-PLACEHOLDER - "What's New" for this version (owner fills before submit).
-First public release of Printing Partner.
+First release of Printing Partner — order Photo, Polaroid and Snapbook prints, pay by UPI, and get them delivered to your door. Thank you for trying us!

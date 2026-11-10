@@ -1,1 +1,1 @@
-photo prints,polaroid,photo book,print photos,snapbook,photo delivery,print app
+photo prints,polaroid,snapbook,print photos,photo book,photo delivery,picture print
