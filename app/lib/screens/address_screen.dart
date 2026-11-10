@@ -84,50 +84,35 @@ class _AddressScreenState extends State<AddressScreen> {
       }
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final result = body['result'] as List?;
+      // The lookup is only a convenience to auto-fill city/state. On ANY
+      // failure (unknown pincode, API down, no city/state) we stay silent —
+      // never a red error — and leave the fields for the customer or the shop
+      // to fill from the pincode. A 6-digit pincode is all that's required.
       if (body['status'] != true || result == null || result.isEmpty) {
-        setState(() {
-          _pincodeError = 'Invalid pincode';
-          _pincodeLoading = false;
-        });
+        setState(() => _pincodeLoading = false);
         return;
       }
       final office = result.first as Map<String, dynamic>;
       final district = (office['district'] ?? office['province'] ?? '').toString();
       final state = (office['state'] ?? '').toString();
-      if (district.isEmpty || state.isEmpty) {
-        setState(() {
-          _pincodeError = 'Could not read city/state';
-          _pincodeLoading = false;
-        });
-        return;
-      }
-      _city.text = district;
-      _state.text = state;
+      if (district.isNotEmpty) _city.text = district;
+      if (state.isNotEmpty) _state.text = state;
       setState(() {
         _pincodeLoading = false;
-        _pincodeOk = true;
+        _pincodeOk = district.isNotEmpty && state.isNotEmpty;
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _pincodeLoading = false;
-        _pincodeError = 'Lookup failed — enter city/state manually';
-      });
+      setState(() => _pincodeLoading = false);
     }
   }
 
   void _onContinue() {
+    // Only name, mobile, address lines and a 6-digit pincode are required.
+    // City/State are a convenience (auto-filled from the pincode); if the
+    // lookup can't reach them the shop fills them from the pincode, so they
+    // never block the order.
     if (!_formKey.currentState!.validate()) return;
-    // Allow continue if either the lookup succeeded OR the user has manually
-    // filled in city + state (fallback when the lookup API is unreachable).
-    final manuallyFilled =
-        _city.text.trim().isNotEmpty && _state.text.trim().isNotEmpty;
-    if (!_pincodeOk && !manuallyFilled) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a valid pincode.')),
-      );
-      return;
-    }
     context.read<Cart>().setCustomer(
           name: _name.text.trim(),
           phone: _phone.text.trim(),
@@ -237,34 +222,28 @@ class _AddressScreenState extends State<AddressScreen> {
                 // lookup is in flight.
                 final hint = _pincodeLoading
                     ? 'Looking up…'
-                    : 'Auto-filled — edit if needed';
+                    : 'Optional — from pincode';
                 return Row(
                   children: [
                     Expanded(
                       child: _Field(
                         controller: _city,
-                        label: 'City',
+                        label: 'City (optional)',
                         readOnly: _pincodeLoading,
                         enabled: !_pincodeLoading,
                         textCapitalization: TextCapitalization.words,
                         hintText: hint,
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? 'Enter city'
-                            : null,
                       ),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: _Field(
                         controller: _state,
-                        label: 'State',
+                        label: 'State (optional)',
                         readOnly: _pincodeLoading,
                         enabled: !_pincodeLoading,
                         textCapitalization: TextCapitalization.words,
                         hintText: hint,
-                        validator: (v) => (v == null || v.trim().isEmpty)
-                            ? 'Enter state'
-                            : null,
                       ),
                     ),
                   ],

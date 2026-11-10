@@ -188,11 +188,16 @@ class _PhotoGrid extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextButton.icon(
-                  onPressed: () => context.push('/photos'),
-                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 16),
-                  label: const Text('Add photos'),
-                ),
+                Builder(builder: (_) {
+                  final cap = cart.selectedPack?.snapCount ?? 0;
+                  final more = cap - cart.items.length;
+                  return TextButton.icon(
+                    onPressed: () => context.push('/photos'),
+                    icon: const Icon(Icons.add_photo_alternate_outlined,
+                        size: 16),
+                    label: Text(more > 0 ? 'Add $more more' : 'Add photos'),
+                  );
+                }),
                 TextButton.icon(
                   onPressed: () => _confirmClearAll(context, cart),
                   icon: const Icon(Icons.delete_outline_rounded, size: 16),
@@ -324,9 +329,13 @@ class _CartSummary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pack = cart.selectedPack;
-    final hasEnoughPhotos = pack != null && cart.itemCount >= pack.snapCount;
+    // Checkout no longer forces the pack to be full — the customer pays the
+    // pack price and prints however many photos they added (the "Add N more"
+    // prompt at the top of the list reminds them how many more fit). We only
+    // need at least one photo and every photo reviewed.
+    final hasPhotos = pack != null && cart.itemCount >= 1;
     final allReviewed = cart.allPhotosReady;
-    final canCheckout = hasEnoughPhotos && allReviewed;
+    final canCheckout = hasPhotos && allReviewed;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
@@ -344,8 +353,8 @@ class _CartSummary extends StatelessWidget {
                   ? (cart.pdfReady
                       ? 'Continue to address →'
                       : 'Upload  ↑')
-                  : !hasEnoughPhotos
-                      ? 'Pick ${pack!.snapCount - cart.itemCount} more'
+                  : !hasPhotos
+                      ? 'Add photos'
                       : !allReviewed
                           ? 'Review crops'
                           : 'Select a product',
@@ -356,7 +365,7 @@ class _CartSummary extends StatelessWidget {
                   ? (cart.pdfReady
                       ? () => context.push('/address')
                       : () => context.push('/upload'))
-                  : !hasEnoughPhotos
+                  : !hasPhotos
                       ? () => context.push('/photos')
                       : !allReviewed
                           ? () => context.push('/crop')
