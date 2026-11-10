@@ -165,3 +165,45 @@ var `MATCH_READONLY=true`.
 - `PLAY_SERVICE_ACCOUNT_JSON` - only if automating Play uploads (B5)
 
 Claude cannot read or write secrets (classifier-blocked); the owner sets these.
+
+---
+
+## ⬛ CURRENT STATUS (10-Nov-2026) — what Claude finished vs what needs YOU
+
+### Apple App Store — STAGED, needs ~5 min from you (one-time)
+Everything is prepared and partly uploaded. The automated tool (fastlane deliver)
+**cannot create a brand-new app's FIRST version** (Apple API returns "No data" —
+a known limitation); it will work for all future updates once the first version
+exists. So the first submission is done once in the console:
+
+1. Sign in at **appstoreconnect.apple.com** → My Apps → **Printing Partner**.
+2. The listing text (name, subtitle, description, keywords, support/privacy URL,
+   category Photo & Video) is already uploaded. The **screenshots** are in the
+   repo at `app/ios/fastlane/screenshots/en-US/` — upload the 3 PNGs to the
+   6.9" display (drag-drop), or tell Claude to run `fastlane screenshots` once
+   the version exists.
+3. **App Privacy** → answer: Photos/Videos = *App Functionality*, **not** used for
+   tracking; Name/Phone/Address = *App Functionality*. No data used to track.
+4. **Age rating** → all *None* → 4+.  **Pricing** → Free.  Availability → India
+   (and anywhere else you want).
+5. **Build** → select build 9 (already on TestFlight). Export compliance is
+   pre-answered (no encryption).
+6. **Add for Review → Submit.**
+> Prefer Claude to drive it? Sign in to App Store Connect in the app's browser
+> and say "done" — Claude will do every click except your password/2FA.
+
+### Google Play — PREPARED, needs you (unavoidable one-time setup + Google's gate)
+`android-release.yml` builds a signed release **.aab** when the keystore secrets
+are present; `build.gradle.kts` is wired. Remaining steps are genuinely owner-only:
+
+1. **Create the upload keystore** (offline, back it up outside the repo):
+   `keytool -genkey -v -keystore printing-partner-upload.jks -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload`
+2. **Set GitHub secrets** (Claude is blocked from writing secrets):
+   `ANDROID_KEYSTORE_B64` = `base64 -w0 printing-partner-upload.jks`,
+   `ANDROID_KEY_PROPERTIES` = the filled `key.properties` text.
+3. **Play Console** → create the app "Printing Partner", enrol in Play App Signing.
+4. Upload the .aab (from `android-release.yml`), fill **Data safety** (same as
+   App Privacy above), **content rating**, store listing (reuse the iOS text +
+   screenshots), pricing = Free.
+5. Google requires **personal accounts to run a closed test with ≥12 testers for
+   14 days** before Production — then promote to Production and submit.
