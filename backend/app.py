@@ -828,12 +828,20 @@ def ingest():
         text += ["", "🚚 <b>Ship to</b>",
                  f"👤 {name}", f"📞 {phone}", f"🏠 {addr}"]
         notify_telegram("\n".join(text))
-        # 2) print-ready PDF of all the photos
-        pdf = build_order_pdf(photos)
+        # 2) print-ready PDF: 12x18 gang sheets (print & cut); one-per-page fallback
+        try:
+            from sheets import build_sheets_pdf
+            pdf = build_sheets_pdf(photos, raw_category, raw_size)
+        except Exception:
+            pdf = None
+        gang = pdf is not None
+        if pdf is None:
+            pdf = build_order_pdf(photos)
         if pdf:
-            send_telegram_document(
-                pdf, f"Order {order_number or file_number}.pdf",
-                f"🖨 Order #{oid} — all {len(written)} photos (print-ready)")
+            cap = (f"🖨 Order #{oid} — {len(written)} photos on 12×18 sheets (print & cut)"
+                   if gang else
+                   f"🖨 Order #{oid} — all {len(written)} photos (print-ready)")
+            send_telegram_document(pdf, f"Order {order_number or file_number}.pdf", cap)
         # 3) the customer's payment screenshot (stashed by /verify-payment)
         shot = _take_payment_shot(utr_val)
         if shot:
