@@ -188,14 +188,16 @@ _model = None
 
 
 def gemini():
-    """Return a configured gemini-2.5-flash model, or None if no key is set."""
+    """Return a configured Gemini model, or None if no key is set.
+    Model is env-overridable (GEMINI_MODEL) so a future model swap needs no code
+    change — Google retires model names over time."""
     global _model
     if not GEMINI_API_KEY:
         return None
     if _model is None:
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
-        _model = genai.GenerativeModel("gemini-2.5-flash")
+        _model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-3.5-flash"))
     return _model
 
 
