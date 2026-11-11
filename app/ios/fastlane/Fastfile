@@ -178,6 +178,7 @@ platform :ios do
       skip_metadata:      true,
       skip_app_version_update: true,
       submit_for_review:  false,
+      run_precheck_before_submit: false,   # precheck can't read IAPs via API key
       force:              true
     )
     UI.success("Screenshots uploaded for #{APP_IDENTIFIER}.")
