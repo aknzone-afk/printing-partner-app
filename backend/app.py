@@ -637,7 +637,10 @@ def ingest():
     # filed + alerted, but clearly flagged 🧪 TEST and never added to the
     # paid-UTR ledger (so it can't collide with or consume a real payment).
     _cust = str(meta.get("customerName") or "").strip().lower()
-    is_test = token == "TEST" and _cust in ("test", "testy")
+    # Kill-switch: set ALLOW_TEST_ORDERS=0 in the .env before PUBLIC launch to
+    # turn the test bypass off instantly (no app rebuild needed). Default on.
+    _allow_test = os.environ.get("ALLOW_TEST_ORDERS", "1") != "0"
+    is_test = _allow_test and token == "TEST" and _cust in ("test", "testy")
     if is_test:
         enforce = False
         payload = None
