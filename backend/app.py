@@ -40,8 +40,10 @@ Secrets (env, see env.example)
 from __future__ import annotations
 
 import base64
+import collections
 import contextlib
 import datetime
+import threading
 import hashlib
 import hmac
 import io
@@ -87,6 +89,50 @@ PLACED_MAX_AHEAD = 24 * 3600
 
 filer = LocalFiler()
 app = Flask(__name__)
+
+# ---- abuse/DoS guard: per-IP rate limiting + HTTP security headers ----------
+# In-memory (per gunicorn worker) sliding-window limiter on the sensitive,
+# cost-bearing endpoints. Limits are generous — a real customer never hits them;
+# a script spamming the Gemini-backed calls or brute-forcing the dashboard does.
+_RL_RULES = {"/login": (12, 60), "/verify-payment": (30, 60),
+             "/chat": (30, 60), "/ingest": (20, 60)}
+_rl_lock = threading.Lock()
+_rl_hits: dict = collections.defaultdict(list)
+
+
+def _client_ip() -> str:
+    # Behind Caddy, the real client is the FIRST hop of X-Forwarded-For.
+    xff = request.headers.get("X-Forwarded-For", "")
+    return xff.split(",")[0].strip() if xff else (request.remote_addr or "?")
+
+
+@app.before_request
+def _rate_limit():
+    rule = _RL_RULES.get(request.path)
+    if not rule:
+        return
+    mx, win = rule
+    now = time.monotonic()
+    key = (_client_ip(), request.path)
+    with _rl_lock:
+        if len(_rl_hits) > 20000:          # guard against unbounded growth
+            _rl_hits.clear()
+        hits = _rl_hits[key]
+        hits[:] = [t for t in hits if t > now - win]
+        if len(hits) >= mx:
+            return jsonify(ok=False, error="rate_limited",
+                           reason="Too many requests — please wait a minute."), 429
+        hits.append(now)
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Strict-Transport-Security", "max-age=15552000")
+    return resp
+
 
 # ------------------------------------------------------------ price catalog
 # The phone states the amount to /verify-payment, so a dishonest client could
