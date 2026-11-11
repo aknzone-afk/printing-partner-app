@@ -631,7 +631,18 @@ def ingest():
     order_number = str(meta.get("orderNumber") or "").encode("utf-8", "replace").decode("utf-8").strip()
 
     token = request.form.get("token", "")
-    payload = _check_token(token) if token else None
+    # TEST-ORDER bypass (owner demo): an order whose customer name is "TEST" or
+    # "TESTY" and whose token is the literal "TEST" skips payment entirely, so
+    # the owner can see exactly how an order arrives without paying. It is still
+    # filed + alerted, but clearly flagged 🧪 TEST and never added to the
+    # paid-UTR ledger (so it can't collide with or consume a real payment).
+    _cust = str(meta.get("customerName") or "").strip().lower()
+    is_test = token == "TEST" and _cust in ("test", "testy")
+    if is_test:
+        enforce = False
+        payload = None
+    else:
+        payload = _check_token(token) if token else None
     if enforce and not payload:
         # Authentic but stale -> the app re-verifies the SAME screenshot for the
         # SAME order (the UTR is not in the ledger yet). Forged/missing -> no
@@ -793,7 +804,8 @@ def ingest():
     # never fail an order whose photos are already on disk.
     try:
         details = (
-            f"Order: {order_number or file_number}\n"
+            ("*** TEST ORDER — no payment (owner test) ***\n" if is_test else "")
+            + f"Order: {order_number or file_number}\n"
             f"Name: {str(meta.get('customerName') or '')[:120]}\n"
             f"Phone: {str(meta.get('customerPhone') or '')[:20]}\n"
             f"Address:\n{str(meta.get('address') or '')[:500]}\n"
@@ -819,7 +831,8 @@ def ingest():
         phone = escape(str(meta.get('customerPhone') or '—'))
         addr = escape((str(meta.get('address') or '').strip() or '—')[:600])
         text = [
-            f"🆕 <b>New order #{oid}</b>",
+            (f"🧪 <b>TEST ORDER #{oid}</b> — no payment" if is_test
+             else f"🆕 <b>New order #{oid}</b>"),
             f"📦 {escape(raw_category)} · {escape(raw_size)} · {len(written)} photos",
         ]
         if amt:

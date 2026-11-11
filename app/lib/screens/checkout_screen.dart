@@ -295,6 +295,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_busy) return; // re-entrancy guard (double-tap / fast re-tap)
     if (_rejected) return; // backend refused the payment: nothing to retry
 
+    // TEST name -> no payment, place the order straight through.
+    if (_placedOrderId == null && _isTestOrder) {
+      await _placeTestOrder();
+      return;
+    }
+
+    // Test name ("TEST"/"TESTY") -> never show or charge payment; place the
+    // order straight through so the owner can see how it arrives.
+    if (_placedOrderId == null && _isTestOrder) {
+      await _placeTestOrder();
+      return;
+    }
+
     // Already paid + order created, but the photo upload failed: resume the
     // upload directly — don't make the customer re-pick / re-verify the
     // screenshot, and never create a second order.
@@ -436,6 +449,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         });
       }
     }
+  }
+
+  /// True when the owner is demoing: the customer name is "TEST"/"TESTY".
+  bool get _isTestOrder {
+    final n = context.read<Cart>().customerName.trim().toLowerCase();
+    return n == 'test' || n == 'testy';
+  }
+
+  /// TEST-ORDER shortcut: skip the whole payment step and place the order
+  /// directly with the sentinel token the backend recognises for a test name.
+  /// The order is filed + alerted (flagged TEST), with no payment and no QR.
+  Future<void> _placeTestOrder() async {
+    if (_busy) return;
+    final pack = context.read<Cart>().selectedPack;
+    if (pack == null) {
+      _showSnack('Pick a print pack first.');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+      _stage = 'Placing test order…';
+    });
+    await _placeOrder(
+      upiProof: const {'method': 'test', 'test': true},
+      token: 'TEST',
+    );
   }
 
   Future<void> _placeOrder({
@@ -777,6 +817,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     // placed must still be able to finish its upload even while a health probe
     // is pending or failed.
     final showSetup = _placedOrderId == null && _backendReady != true;
+    // Owner test: name is "TEST"/"TESTY" -> hide the payment gateway and place
+    // the order directly (fresh order only; a placed order's retry is normal).
+    final testMode = _placedOrderId == null &&
+        (cart.customerName.trim().toLowerCase() == 'test' ||
+            cart.customerName.trim().toLowerCase() == 'testy');
 
     return PopScope(
       // Never leave while an order is being created / sent: the resume state
@@ -815,7 +860,82 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 _PriceError(onRetry: _loadPrice),
               ],
               const SizedBox(height: 20),
-              if (showSetup)
+              if (testMode) ...[
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF4E5),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFFB74D)),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('🧪', style: TextStyle(fontSize: 22)),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Test order — no payment',
+                                style: TextStyle(
+                                    fontSize: 15, fontWeight: FontWeight.w700)),
+                            SizedBox(height: 4),
+                            Text(
+                                'The name is "TEST", so the payment step is '
+                                'skipped. Tap below to send the order straight '
+                                'to the shop — just to check how it arrives.',
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    color: AppColors.textSecondary)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                if (_busy && _stage.isNotEmpty) ...[
+                  const Center(child: CircularProgressIndicator()),
+                  const SizedBox(height: 10),
+                  Center(
+                    child: Text(_stage,
+                        style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textSecondary)),
+                  ),
+                ] else if (!_rejected)
+                  PrimaryButton(
+                    label: 'Place test order',
+                    icon: Icons.science_rounded,
+                    onPressed: _busy ? null : _placeTestOrder,
+                  ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFDECEA),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.info_outline,
+                            color: Color(0xFFC0392B), size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(_error!,
+                              style: const TextStyle(
+                                  fontSize: 13, color: Color(0xFFC0392B))),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ]
+              else if (showSetup)
                 _BackendNotReady(
                     checking: _healthChecking, onRetry: _checkHealth)
               else if (!UpiQr.configured)

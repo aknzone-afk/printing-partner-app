@@ -11,8 +11,12 @@ EnvironmentFile=/opt/printing-partner-backend/.env
 # gthread, NOT the default sync worker: a sync worker is killed (WORKER TIMEOUT -> 500)
 # when ONE request takes longer than --timeout, so a 9 MB order on a slow mobile
 # uplink (>120 s of upload) could never be filed. Threaded workers keep their
-# heartbeat while a slow body arrives, and 2x4 requests are served at once.
-ExecStart=/opt/printing-partner-backend/venv/bin/gunicorn -w 2 -k gthread --threads 4 -b 127.0.0.1:8080 --timeout 900 app:app
+# heartbeat while a slow body arrives, and the threads serve requests at once.
+# ONE worker (not 2): the VM is a 1-vCPU / ~956 MB Oracle free tier. A second
+# worker is a full extra copy of the Gemini SDK + PIL resident set (~100-150 MB)
+# with no CPU to use it, and it was pushing the box to 95% RAM / OOM. Threads
+# (gthread x4) give the concurrency; swap (2 GB) is the safety net.
+ExecStart=/opt/printing-partner-backend/venv/bin/gunicorn -w 1 -k gthread --threads 4 -b 127.0.0.1:8080 --timeout 900 app:app
 Restart=always
 RestartSec=5
 
