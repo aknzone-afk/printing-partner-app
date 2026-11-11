@@ -3,6 +3,10 @@ import 'dart:typed_data';
 import 'photo_bytes_io.dart' if (dart.library.html) 'photo_bytes_web.dart'
     as platform;
 
+/// True only under `flutter test` (native codec unreachable from a `compute`
+/// isolate there); always false in the real app and on web.
+bool get isFlutterTest => platform.isFlutterTest;
+
 /// Reads a local image file from the device filesystem (native only).
 /// Returns null on web or on read failure.
 Future<Uint8List?> readLocalBytes(String path) => platform.readLocalBytes(path);

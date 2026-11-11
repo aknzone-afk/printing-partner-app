@@ -55,6 +55,15 @@ dependencies:
   # when building the print sheets.
   flutter_image_compress: ^2.4.0
 
+  # Native JPEG codec (Android Bitmap/Skia, iOS ImageIO/CoreGraphics) — decodes
+  # the source photo and encodes the cropped print at NATIVE speed, 20–40× the
+  # pure-Dart `image` package. Ported from PrintCollageTool (confirmed on-device
+  # ~2 s/sheet vs ~5 min pure-Dart). Every method returns null on any failure,
+  # so photo_export.dart keeps the pure-Dart path as an identical-output
+  # fallback (desktop/web/test all run on it).
+  bb_native_codec:
+    path: bb_native_codec
+
   # Native PDF share/print on iOS & Android (system share sheet). The web
   # build still uses the dart:html blob download in pdf_download_web.dart.
   printing: ^5.14.3

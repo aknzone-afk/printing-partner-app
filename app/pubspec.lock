@@ -41,6 +41,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.2.9"
+  bb_native_codec:
+    dependency: "direct main"
+    description:
+      path: bb_native_codec
+      relative: true
+    source: path
+    version: "0.0.1"
   bidi:
     dependency: transitive
     description:
