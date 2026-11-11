@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:bb_native_codec/bb_native_codec.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/services.dart' show RootIsolateToken, BackgroundIsolateBinaryMessenger;
 import 'package:http/http.dart' as http;
 import 'package:image/image.dart' as img;
 
@@ -98,6 +100,13 @@ Future<List<Uint8List>> renderCroppedJpegs(
   var next = 0;
   var done = 0;
 
+  // Captured on THIS (root) isolate so each `compute` worker can switch on the
+  // native codec (platform channels need the root token in a background
+  // isolate). Null on web / under `flutter test` (the channel is unreachable
+  // from a compute isolate there) → every worker runs the pure-Dart path.
+  final RootIsolateToken? rootToken =
+      (kIsWeb || isFlutterTest) ? null : RootIsolateToken.instance;
+
   // Dart is single-threaded between awaits, so `next++` / `++done` never race:
   // the increment and the lookup run with no other worker interleaved.
   Future<void> worker() async {
@@ -114,6 +123,7 @@ Future<List<Uint8List>> renderCroppedJpegs(
         outputCap: outputCap,
         jpegQuality: jpegQuality,
         maxBytes: maxBytes,
+        rootToken: rootToken,
       );
       // Monotonic 1..n in COMPLETION order (not index order), so the checkout
       // progress label still counts up smoothly across the pool.
@@ -140,6 +150,7 @@ Future<Uint8List> _renderItem(
   required int outputCap,
   required int jpegQuality,
   required int maxBytes,
+  RootIsolateToken? rootToken,
 }) async {
   final crop = edit.crop;
 
@@ -171,6 +182,7 @@ Future<Uint8List> _renderItem(
     maxLongSide: outputCap,
     printLongSide: longSide,
     quality: jpegQuality,
+    rootToken: rootToken,
   );
   Uint8List? jpg = await _render(job);
 
@@ -328,6 +340,7 @@ class _RenderJob {
     required this.maxLongSide,
     required this.printLongSide,
     required this.quality,
+    this.rootToken,
   });
 
   final Uint8List bytes;
@@ -349,6 +362,10 @@ class _RenderJob {
   final int printLongSide;
   final int quality;
 
+  /// Root isolate token so a `compute` worker can reach the native codec
+  /// channel (null → pure-Dart path, e.g. web / tests).
+  final RootIsolateToken? rootToken;
+
   _RenderJob withBytes(Uint8List b) => _RenderJob(
         bytes: b,
         aspect: aspect,
@@ -359,6 +376,7 @@ class _RenderJob {
         maxLongSide: maxLongSide,
         printLongSide: printLongSide,
         quality: quality,
+        rootToken: rootToken,
       );
 
   _RenderJob withQuality(int q) => _RenderJob(
@@ -371,6 +389,7 @@ class _RenderJob {
         maxLongSide: maxLongSide,
         printLongSide: printLongSide,
         quality: q,
+        rootToken: rootToken,
       );
 }
 
@@ -475,10 +494,28 @@ List<double> _effectiveCrop(int w, int h, double aspect, bool skipped,
   return <double>[0, top, 1, 1 - top];
 }
 
-/// Pure-Dart decode → orient → rotate → crop onto white → cap → JPEG.
-/// Top-level so `compute` can run it on a background isolate. Returns null
-/// when the bytes cannot be decoded (caller tries the native transcode).
-Uint8List? _renderOne(_RenderJob job) {
+/// Decode → orient → rotate → crop onto white → cap → JPEG. Decode / orient /
+/// rotate / crop stay pure-Dart (so EXIF handling is exact); the two heaviest
+/// back-end steps — the final downscale and the JPEG encode — run on the
+/// platform's NATIVE codec when it is reachable (the PrintCollageTool engine),
+/// and fall back to the identical pure-Dart `image` path otherwise. Top-level
+/// so `compute` can run it on a background isolate; returns null when the bytes
+/// cannot be decoded (caller tries the native transcode).
+Future<Uint8List?> _renderOne(_RenderJob job) async {
+  // Switch on the native codec in THIS background isolate — platform channels
+  // need the root token here (the PrintCollageTool cross-isolate trick). Any
+  // failure, or a null token (web / tests), leaves `native` false → pure-Dart.
+  var native = false;
+  final token = job.rootToken;
+  if (token != null) {
+    try {
+      BackgroundIsolateBinaryMessenger.ensureInitialized(token);
+      native = true;
+    } catch (_) {
+      native = false;
+    }
+  }
+
   img.Image? decoded;
   try {
     decoded = img.decodeImage(job.bytes);
@@ -496,6 +533,12 @@ Uint8List? _renderOne(_RenderJob job) {
   if (ifd.hasOrientation && ifd.orientation != 1) {
     image = img.bakeOrientation(image);
   }
+
+  // Graphics (transparent stickers / PNG logos / quote cards) need the
+  // pure-Dart 4:4:4 encode to keep text/edges crisp; photos do not. Decide
+  // BEFORE the alpha flatten, and let only photos take the native (4:2:0)
+  // encode — a photo is soft-edged so subsampling is invisible on it.
+  final bool isGraphic = (image.numChannels == 2) || image.hasAlpha;
 
   // Transparent stickers / PNG graphics must land on WHITE, never black.
   // A 2-channel image is grey + alpha (PNG colour type 4: black-and-white
@@ -546,11 +589,43 @@ Uint8List? _renderOne(_RenderJob job) {
       targetW: math.max(1, (frameW * f).round()),
       targetH: math.max(1, (frameH * f).round()));
 
+  final outLongest = math.max(image.width, image.height);
+
+  // NATIVE fast path (photos only): hand the cropped RGBA straight to the
+  // platform codec — Android Bitmap / iOS CoreGraphics encode the JPEG, and
+  // `transcodeFit` does the final downscale, both ~20-40× faster than the
+  // pure-Dart cubic-resize + `encodeJpg` below. Any null (channel missing,
+  // OOM, desktop/web) drops through to the identical pure-Dart path, so the
+  // output never depends on the native codec being present.
+  if (native && !isGraphic) {
+    // RGBA (alpha forced to 255) — the native codec needs exactly w*h*4 bytes;
+    // if the order expansion ever yields a different length, skip native.
+    final rgba = image.getBytes(order: img.ChannelOrder.rgba);
+    final encoded = rgba.length != image.width * image.height * 4
+        ? null
+        : await BbNativeCodec.encodeRgbaJpeg(
+            width: image.width,
+            height: image.height,
+            rgba: rgba,
+            quality: job.quality,
+          );
+    if (encoded != null) {
+      if (outLongest <= job.printLongSide) return encoded;
+      final capped = await BbNativeCodec.transcodeFitJpeg(
+        src: encoded,
+        maxW: job.printLongSide,
+        maxH: job.printLongSide,
+        quality: job.quality,
+      );
+      if (capped != null) return capped;
+    }
+    // native encode/cap failed → fall through to pure-Dart.
+  }
+
   // Cap the longest side at the PRINT budget (never upscale) — the kept region
   // is sized for the print, not for the larger source it was cut from. Keeps
   // every file well inside the backend's 12 MB per-photo limit while preserving
   // print detail.
-  final outLongest = math.max(image.width, image.height);
   if (outLongest > job.printLongSide) {
     image = image.width >= image.height
         ? img.copyResize(image,

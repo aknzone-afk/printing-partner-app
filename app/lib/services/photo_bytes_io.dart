@@ -5,6 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image/image.dart' as img;
 
+/// True under `flutter test` (the harness sets FLUTTER_TEST=true). Platform
+/// channels cannot be driven from a `compute` isolate in that environment, so
+/// the native codec is skipped there and the pure-Dart render path runs — which
+/// is exactly what the export tests verify. Always false in the real app.
+bool get isFlutterTest => Platform.environment.containsKey('FLUTTER_TEST');
+
 /// Reads a local image file from the device filesystem.
 ///
 /// The native image pickers (image_picker / wechat_assets_picker) return a

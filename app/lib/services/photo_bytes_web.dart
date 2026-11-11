@@ -2,6 +2,10 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
+/// Web has no native codec and its own render path, so the flag is irrelevant
+/// here; always false.
+bool get isFlutterTest => false;
+
 /// Web stub. On web, photos are blob:/http URLs fetched over the network, so
 /// there is never a local filesystem path to read.
 Future<Uint8List?> readLocalBytes(String path) async => null;

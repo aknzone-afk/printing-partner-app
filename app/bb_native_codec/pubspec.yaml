@@ -1,0 +1,21 @@
+name: bb_native_codec
+description: "Native Android JPEG codec (Bitmap/Skia) for PrintCollageTool - decode, encode, and fit-transcode at native speed."
+version: 0.0.1
+publish_to: 'none'
+
+environment:
+  sdk: ^3.0.0
+  flutter: ">=3.3.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.bb.nativecodec
+        pluginClass: NativeCodecPlugin
+      ios:
+        pluginClass: NativeCodecPlugin
