@@ -1,8 +1,10 @@
-# App Store screenshots on an iPhone Pro Max SIMULATOR (reliable — the Android
-# emulator won't boot on GitHub runners). Boots the sim, walks the customer flow
+# App Store screenshots on iOS SIMULATORS (reliable — the Android emulator won't
+# boot on GitHub runners). Boots each sim, walks the customer flow
 # (integration_test/review_flow_test.dart, which pauses on each screen) and
-# captures a simctl screenshot every ~1.5s. Upload artifact = a set of PNGs at
-# the 6.9"/6.7" App Store size; pick the best ones for the listing.
+# captures a simctl screenshot every ~1.5s. Artifact per device = PNGs at that
+# device's native App Store size. The app is universal (iPhone + iPad), so we
+# capture BOTH an iPhone Pro Max (6.9") and an iPad Pro 13" set; resize the 6.9"
+# iPhone shots to 6.3" afterwards (same aspect) if a medium-iPhone set is needed.
 # Started by hand only (macOS minutes are costly).
 name: iOS store screenshots
 
@@ -16,6 +18,14 @@ jobs:
   shots:
     runs-on: macos-26
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: iphone
+            label: iphone-6_9
+          - kind: ipad
+            label: ipad-13
     steps:
       - uses: actions/checkout@v7
 
@@ -48,20 +58,31 @@ jobs:
         working-directory: app/ios
         run: bundle exec pod install --repo-update
 
-      - name: Boot an iPhone Pro Max simulator (6.9" / 6.7" store size)
+      - name: Boot a ${{ matrix.kind }} simulator
         id: sim
+        env:
+          KIND: ${{ matrix.kind }}
         run: |
-          UDID=$(xcrun simctl list devices available -j | python3 -c '
-          import json,sys
+          UDID=$(xcrun simctl list devices available -j | KIND="$KIND" python3 -c '
+          import json,sys,os
+          kind=os.environ["KIND"]
           d=json.load(sys.stdin)["devices"]
           rts=sorted([r for r in d if "iOS" in r], key=lambda r:[int(x) for x in r.split("iOS-")[1].split("-")])
-          for rt in reversed(rts):
-              pm=[x for x in d[rt] if x["name"].startswith("iPhone") and "Pro Max" in x["name"]]
-              if pm: print(pm[-1]["udid"]); break
-          else:
+          def pick(pred):
               for rt in reversed(rts):
-                  ph=[x for x in d[rt] if x["name"].startswith("iPhone")]
-                  if ph: print(ph[-1]["udid"]); break')
+                  m=[x for x in d[rt] if x["name"].startswith(("iPhone","iPad")) and pred(x["name"])]
+                  if m: return m[-1]["udid"]
+              return None
+          if kind=="ipad":
+              u=pick(lambda n: n.startswith("iPad") and ("Pro" in n) and ("13" in n or "12.9" in n)) \
+                or pick(lambda n: n.startswith("iPad") and "Pro" in n) \
+                or pick(lambda n: n.startswith("iPad"))
+          else:
+              u=pick(lambda n: n.startswith("iPhone") and "Pro Max" in n) \
+                or pick(lambda n: n.startswith("iPhone") and "Plus" in n) \
+                or pick(lambda n: n.startswith("iPhone"))
+          print(u or "")')
+          test -n "$UDID"
           echo "udid=$UDID" >> $GITHUB_OUTPUT
           xcrun simctl list devices | grep "$UDID"
           xcrun simctl boot "$UDID"
@@ -77,8 +98,6 @@ jobs:
         run: |
           UDID=${{ steps.sim.outputs.udid }}
           mkdir -p ../out
-          # Capture a screenshot every 1.5s in the background while the flow test
-          # navigates and pauses on each screen.
           ( i=0; while true; do
               printf -v n "%03d" "$i"
               xcrun simctl io "$UDID" screenshot --type=png "../out/shot_$n.png" >/dev/null 2>&1 || true
@@ -88,7 +107,6 @@ jobs:
           flutter test integration_test/review_flow_test.dart -d "$UDID" 2>&1 | tee ../out/test.log || true
           sleep 2
           kill "$CAP" 2>/dev/null || true
-          # Drop exact-duplicate frames (screen held still) to cut the set down.
           cd ../out
           python3 - <<'PY'
           import hashlib, os, glob
@@ -104,5 +122,5 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: printing-partner-store-shots
+          name: printing-partner-shots-${{ matrix.label }}
           path: out/
