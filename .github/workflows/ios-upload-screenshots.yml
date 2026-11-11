@@ -1,0 +1,37 @@
+# Upload ONLY the App Store screenshots (fastlane/screenshots/en-US/) to the
+# in-flight version via the App Store Connect API. No binary, no metadata, NO
+# submit — purely the screenshots. deliver is API-only, so this runs on Linux
+# (no Mac). Started by hand.
+name: iOS upload screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/ios
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: app/ios
+
+      - name: fastlane screenshots (deliver, screenshots only)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          LANG: en_US.UTF-8
+          LC_ALL: en_US.UTF-8
+        run: bundle exec fastlane screenshots
