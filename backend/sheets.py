@@ -90,6 +90,20 @@ def _plan(category, size_label):
     }
 
 
+def _read_bytes(src):
+    """Return raw JPEG bytes from either bytes OR a file-like stream. /ingest
+    passes Werkzeug upload streams that the filer has ALREADY read to EOF, so we
+    seek(0) first; samples pass plain bytes. (Opening a stream with
+    io.BytesIO(stream) silently failed -> every photo skipped -> blank sheets.)"""
+    if isinstance(src, (bytes, bytearray, memoryview)):
+        return bytes(src)
+    try:
+        src.seek(0)
+    except Exception:
+        pass
+    return src.read()
+
+
 def _render_sheet(photos, start, p):
     """Render a single 12x18 sheet image for photos[start : start+per_sheet]."""
     from PIL import Image, ImageDraw
@@ -107,7 +121,7 @@ def _render_sheet(photos, start, p):
         r, c = divmod(idx, cols)
         x, y = c * cell_w, r * cell_h
         try:
-            im = Image.open(io.BytesIO(photos[gi])).convert("RGB")
+            im = Image.open(io.BytesIO(_read_bytes(photos[gi]))).convert("RGB")
         except Exception:
             continue
         if p["rotate"]:

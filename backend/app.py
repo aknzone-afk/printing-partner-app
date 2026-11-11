@@ -569,6 +569,12 @@ def build_order_pdf(photos, caps=(2000, 1400, 1000), quality=85):
             imgs = []
             for b in photos:
                 try:
+                    if hasattr(b, "read"):   # Werkzeug upload stream (filer read it to EOF)
+                        try:
+                            b.seek(0)
+                        except Exception:
+                            pass
+                        b = b.read()
                     im = Image.open(io.BytesIO(b)).convert("RGB")
                     im.thumbnail((cap, cap))
                     imgs.append(im)
