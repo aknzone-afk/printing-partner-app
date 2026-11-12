@@ -324,6 +324,41 @@ class _PrintCard extends StatelessWidget {
                               fontWeight: FontWeight.w800)),
                     ),
                   ),
+                  // Visible "Edit" affordance so it's obvious every photo can be
+                  // re-cropped / auto-cropped / zoomed. Tapping anywhere on the
+                  // tile (or this pill) opens the crop screen for this photo.
+                  Positioned(
+                    right: 8,
+                    bottom: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.25),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.crop_rotate_rounded,
+                              size: 13, color: Colors.white),
+                          SizedBox(width: 4),
+                          Text('Edit',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700)),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
