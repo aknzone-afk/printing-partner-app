@@ -389,7 +389,7 @@ class _PrintCard extends StatelessWidget {
         size: pack.size,
         rotationDeg: 0,
         elevation: 10,
-        child: _image(BoxFit.cover),
+        child: _image(BoxFit.contain),
       );
     }
 
@@ -400,7 +400,7 @@ class _PrintCard extends StatelessWidget {
       decoration: BoxDecoration(color: Colors.white, boxShadow: shadow),
       child: AspectRatio(
         aspectRatio: pack.size.imageAspectWxH,
-        child: _image(BoxFit.cover),
+        child: _image(BoxFit.contain),
       ),
     );
   }

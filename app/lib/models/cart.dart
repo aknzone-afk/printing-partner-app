@@ -147,16 +147,17 @@ class Cart extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Give every photo that has no crop yet an auto cover-crop (centre-fit to the
-  /// print aspect, never white-padded), in ONE batch. Called right after the
-  /// customer finishes picking, so the preview shows each photo already fitted
-  /// to how it will print; they open the crop screen only to adjust one.
+  /// Give every photo that has no crop yet an auto WHITE-PAD fit — the WHOLE
+  /// photo centred inside the print shape, with white where it is narrower or
+  /// wider than the print — in ONE batch. Called right after the customer
+  /// finishes picking, so the preview shows each photo EXACTLY as it will print:
+  /// nothing cropped off (critical for screenshots / documents), white edges
+  /// where it doesn't fill. They open the crop screen only to zoom/crop one.
   /// Photos the customer already cropped are left untouched.
   void autoFillCrops() {
     setCrops(<String, CropEdit>{
       for (final item in _items)
-        if (!_edits.containsKey(item.id))
-          item.id: const CropEdit.cropped(offsetX: 0, offsetY: 0, scale: 1),
+        if (!_edits.containsKey(item.id)) item.id: const CropEdit.skipped(),
     });
   }
 

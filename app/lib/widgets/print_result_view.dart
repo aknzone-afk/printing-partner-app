@@ -70,6 +70,8 @@ class PrintResultView extends StatelessWidget {
             color: AppColors.primary, size: 20),
       );
     }
-    return Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true);
+    // contain, never cover: show the ENTIRE print (incl. its white edges)
+    // exactly as it will print — cover would crop the white / content off.
+    return Image.memory(bytes, fit: BoxFit.contain, gaplessPlayback: true);
   }
 }
