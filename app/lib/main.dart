@@ -75,7 +75,14 @@ final GoRouter _router = GoRouter(
         path: '/snapbook-packages',
         builder: (_, __) =>
             const PackagesScreen(category: PrintCategory.snapbook)),
-    GoRoute(path: '/photos', builder: (_, __) => const PhotoPickerScreen()),
+    GoRoute(
+      path: '/photos',
+      builder: (_, state) => PhotoPickerScreen(
+        // ?add=1 (from the cart's "Add N more") → open the gallery immediately
+        // and pop straight back, so the in-between picker page never shows.
+        autoOpen: state.uri.queryParameters['add'] == '1',
+      ),
+    ),
     GoRoute(
       path: '/crop',
       builder: (_, state) => CropScreen(

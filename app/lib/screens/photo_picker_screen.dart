@@ -11,7 +11,12 @@ import '../widgets/photo_thumb.dart';
 import '../widgets/primary_button.dart';
 
 class PhotoPickerScreen extends StatefulWidget {
-  const PhotoPickerScreen({super.key});
+  const PhotoPickerScreen({super.key, this.autoOpen = false});
+
+  /// True when opened from the cart's "Add N more" — jump straight into the
+  /// phone gallery and, once it closes, pop back to the cart without ever
+  /// showing this intermediate "select photos" page.
+  final bool autoOpen;
 
   @override
   State<PhotoPickerScreen> createState() => _PhotoPickerScreenState();
@@ -28,12 +33,13 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
   @override
   void initState() {
     super.initState();
-    // If we arrived from a pack-pill tap, open the asset picker immediately
-    // so the customer skips the empty "intro" state.
+    // Open the asset picker immediately — either from a pack-pill tap on an
+    // empty cart (skip the intro state), or from the cart's "Add N more"
+    // (widget.autoOpen) so the gallery opens with no in-between page.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _autoOpened) return;
       final cart = context.read<Cart>();
-      if (cart.selectedPack != null && cart.isEmpty) {
+      if (widget.autoOpen || (cart.selectedPack != null && cart.isEmpty)) {
         _autoOpened = true;
         _pickFromGallery();
       }
@@ -42,6 +48,10 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
 
   Future<void> _pickFromGallery() async {
     final wasAutoOpen = _autoOpened && context.read<Cart>().isEmpty;
+    // Opened from the cart's "Add N more": once the gallery closes (photos
+    // added OR cancelled), pop straight back to the cart — never render this
+    // page. (Pack-becomes-complete still goes forward to the preview below.)
+    final returnToCaller = widget.autoOpen;
     setState(() => _picking = true);
     try {
       // Ask for photo access first, so a denial shows a way forward (Settings)
@@ -51,7 +61,9 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
       if (!ps.hasAccess) {
         setState(() => _picking = false);
         await _showPermissionDialog();
-        if (wasAutoOpen && mounted && context.canPop()) context.pop();
+        if ((wasAutoOpen || returnToCaller) && mounted && context.canPop()) {
+          context.pop();
+        }
         return;
       }
 
@@ -125,11 +137,16 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
           context.push('/preview');
           return;
         }
-        if (good.isEmpty && wasAutoOpen && mounted && context.canPop()) {
+        // Came from the cart to add more (or the empty-cart auto-open with
+        // nothing added) → go straight back instead of showing this page.
+        if ((returnToCaller || (good.isEmpty && wasAutoOpen)) &&
+            mounted &&
+            context.canPop()) {
           context.pop();
           return;
         }
-      } else if (wasAutoOpen && mounted) {
+      } else if ((wasAutoOpen || returnToCaller) && mounted) {
+        // Gallery cancelled with nothing picked → return to where we came from.
         if (context.canPop()) {
           context.pop();
         }
@@ -199,10 +216,10 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
     final remaining = (target - picked).clamp(0, target);
     final complete = target > 0 && picked >= target;
 
-    // While the OS picker is open and the screen is empty, render a minimal
-    // loader instead of the full intro + buttons (which would otherwise be
-    // visible behind the picker).
-    final showPickerOverlay = _picking && cart.isEmpty;
+    // While the OS picker is open, render a minimal loader instead of the full
+    // page — both for the empty-cart auto-open AND the cart's "Add more"
+    // (widget.autoOpen), so this intermediate page never flashes behind it.
+    final showPickerOverlay = _picking && (cart.isEmpty || widget.autoOpen);
 
     return Scaffold(
       appBar: AppBar(

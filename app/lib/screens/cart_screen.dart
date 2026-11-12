@@ -281,7 +281,9 @@ class _PhotoGridState extends State<_PhotoGrid> {
                   // Pack full → nothing to add, so don't show the button at all.
                   if (more <= 0) return const SizedBox.shrink();
                   return TextButton.icon(
-                    onPressed: () => context.push('/photos'),
+                    // add=1 → the picker opens the phone gallery straight away
+                    // (no in-between "select photos" page) and returns here.
+                    onPressed: () => context.push('/photos?add=1'),
                     icon: const Icon(Icons.add_photo_alternate_outlined,
                         size: 16),
                     label: Text('Add $more more'),
