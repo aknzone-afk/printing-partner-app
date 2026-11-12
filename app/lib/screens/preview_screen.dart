@@ -296,6 +296,8 @@ class _ResultGrid extends StatelessWidget {
                 total: count,
                 pack: pack,
                 jpg: previews.length > i ? previews[i] : null,
+                warn: i < cart.items.length &&
+                    (cart.cropFor(cart.items[i].id)?.skipped ?? true),
                 onTap: () => onEditPhoto(i),
               ),
               childCount: count,
@@ -316,12 +318,14 @@ class _PrintCard extends StatelessWidget {
     required this.total,
     required this.pack,
     required this.jpg,
+    required this.warn,
     required this.onTap,
   });
   final int index;
   final int total;
   final PrintPack pack;
   final Uint8List? jpg;
+  final bool warn;
   final VoidCallback onTap;
 
   @override
@@ -338,6 +342,43 @@ class _PrintCard extends StatelessWidget {
               child: Stack(
                 children: [
                   _print(),
+                  // Red "crop me" banner when this photo will print with white
+                  // edges (it doesn't fill the print shape, not yet cropped).
+                  if (warn && jpg != null)
+                    Positioned(
+                      left: 4,
+                      right: 4,
+                      top: 4,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: AppColors.error,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 13, color: Colors.white),
+                            SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                'Crop to fill — or it prints with white',
+                                maxLines: 2,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    height: 1.1),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   Positioned(
                     top: 6,
                     left: 6,
@@ -421,7 +462,9 @@ class _PrintCard extends StatelessWidget {
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(5),
-            border: Border.all(color: const Color(0xFF26262B), width: 2),
+            border: Border.all(
+                color: warn ? AppColors.error : const Color(0xFF26262B),
+                width: warn ? 2.5 : 2),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.22),

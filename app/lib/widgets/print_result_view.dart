@@ -20,11 +20,16 @@ class PrintResultView extends StatelessWidget {
     required this.jpg,
     required this.size,
     this.elevation = 10,
+    this.warn = false,
   });
 
   final Uint8List? jpg;
   final PrintSize size;
   final double elevation;
+
+  /// True when this photo will print with white edges (it doesn't fill the
+  /// print shape and hasn't been cropped) — the frame turns red to prompt a crop.
+  final bool warn;
 
   @override
   Widget build(BuildContext context) {
@@ -47,7 +52,9 @@ class PrintResultView extends StatelessWidget {
         child: Container(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(5),
-            border: Border.all(color: const Color(0xFF26262B), width: 2),
+            border: Border.all(
+                color: warn ? AppColors.error : const Color(0xFF26262B),
+                width: warn ? 2.5 : 2),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.22),

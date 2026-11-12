@@ -320,6 +320,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
               position: position,
               tilt: tilt,
               busy: _busy.contains(index),
+              warn: cart.cropFor(item.id)?.skipped ?? true,
               onEdit: () => _editTile(index),
               onRemove: () => cart.remove(item.id),
             );
@@ -340,6 +341,7 @@ class _SelectionTile extends StatelessWidget {
     required this.position,
     required this.tilt,
     required this.busy,
+    required this.warn,
     required this.onEdit,
     required this.onRemove,
   });
@@ -348,6 +350,7 @@ class _SelectionTile extends StatelessWidget {
   final String position;
   final double tilt;
   final bool busy;
+  final bool warn;
   final VoidCallback onEdit;
   final VoidCallback onRemove;
 
@@ -361,8 +364,17 @@ class _SelectionTile extends StatelessWidget {
           child: Stack(
             children: [
               Positioned.fill(
-                child: PrintResultView(jpg: jpg, size: size),
+                child: PrintResultView(jpg: jpg, size: size, warn: warn),
               ),
+              // Red "crop me" banner when this photo will print with white edges
+              // (it doesn't fill the print shape and hasn't been cropped yet).
+              if (warn && !busy && jpg != null)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: 0,
+                  child: _CropHintBanner(),
+                ),
               // While this one photo re-renders after an edit (or on first
               // load), a spinner sits ON the tile — no top loading line.
               if (busy || jpg == null)
@@ -550,6 +562,42 @@ class _CartSummary extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// A small red banner across the top of a tile warning that the photo will
+/// print with white edges unless it's cropped to fill — tap the tile to crop.
+class _CropHintBanner extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(2, 2, 2, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.error,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 13, color: Colors.white),
+          SizedBox(width: 4),
+          Flexible(
+            child: Text(
+              'Crop to fill — or it prints with white',
+              maxLines: 2,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  height: 1.1),
+            ),
+          ),
+        ],
       ),
     );
   }
