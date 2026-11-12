@@ -38,23 +38,33 @@ class PrintResultView extends StatelessWidget {
         child: _image(),
       );
     }
-    // Photo / Snapbook: glossy print with a thin white border + soft shadow.
+    // Photo / Snapbook: a slim DARK frame hugging the print — NO white mat, so
+    // the only white the customer sees is the print's OWN (what actually
+    // prints), never a frame border that looks like extra white around it.
     return Center(
       child: AspectRatio(
         aspectRatio: size.imageAspectWxH,
         child: Container(
-          padding: const EdgeInsets.all(5),
           decoration: BoxDecoration(
-            color: Colors.white,
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: const Color(0xFF26262B), width: 2),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.18),
-                blurRadius: elevation,
+                color: Colors.black.withValues(alpha: 0.22),
+                blurRadius: elevation + 4,
                 offset: Offset(0, elevation / 2),
+              ),
+              const BoxShadow(
+                color: Color(0x0F000000),
+                blurRadius: 3,
+                offset: Offset(0, 1),
               ),
             ],
           ),
-          child: _image(),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: _image(),
+          ),
         ),
       ),
     );

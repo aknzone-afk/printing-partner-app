@@ -411,34 +411,32 @@ class _PrintCard extends StatelessWidget {
       );
     }
 
-    // Photo / Snapbook: a LUXURY framed print — a soft gold border over a white
-    // mat, a layered drop shadow and gently rounded corners — so the preview
-    // reads like a real framed photograph. The image inside is the EXACT print
-    // (BoxFit.contain, white where the photo doesn't fill the print shape).
+    // Photo / Snapbook: a slim DARK frame hugging the print — NO white mat, so
+    // the only white the customer sees is the print's OWN (what actually
+    // prints), never a frame border that looks like extra white around it. A
+    // layered drop shadow makes it read like a real framed photograph.
     return Center(
       child: AspectRatio(
         aspectRatio: pack.size.imageAspectWxH,
         child: Container(
-          padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(color: const Color(0xFFD9C38A), width: 1.4),
+            borderRadius: BorderRadius.circular(5),
+            border: Border.all(color: const Color(0xFF26262B), width: 2),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.22),
                 blurRadius: 16,
                 offset: const Offset(0, 8),
               ),
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.07),
+              const BoxShadow(
+                color: Color(0x0F000000),
                 blurRadius: 3,
-                offset: const Offset(0, 1),
+                offset: Offset(0, 1),
               ),
             ],
           ),
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(3),
             child: _image(BoxFit.contain),
           ),
         ),
