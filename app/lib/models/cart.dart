@@ -147,6 +147,19 @@ class Cart extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Give every photo that has no crop yet an auto cover-crop (centre-fit to the
+  /// print aspect, never white-padded), in ONE batch. Called right after the
+  /// customer finishes picking, so the preview shows each photo already fitted
+  /// to how it will print; they open the crop screen only to adjust one.
+  /// Photos the customer already cropped are left untouched.
+  void autoFillCrops() {
+    setCrops(<String, CropEdit>{
+      for (final item in _items)
+        if (!_edits.containsKey(item.id))
+          item.id: const CropEdit.cropped(offsetX: 0, offsetY: 0, scale: 1),
+    });
+  }
+
   /// True when every photo has been reviewed (either cropped or explicitly
   /// accepted with auto white padding).
   bool get allPhotosReady {

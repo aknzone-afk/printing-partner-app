@@ -108,7 +108,12 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
         if (!mounted) return;
 
         final cart = context.read<Cart>();
-        if (good.isNotEmpty) cart.addPhotos(good);
+        if (good.isNotEmpty) {
+          cart.addPhotos(good);
+          // Auto cover-crop the newly picked photos so the preview shows them
+          // already fitted to the print (the customer edits only if they want).
+          cart.autoFillCrops();
+        }
         if (failed > 0 || bad > 0) _showSkippedMessage(failed, bad);
 
         if (_target > 0 &&
@@ -117,7 +122,7 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
             mounted) {
           // push (not go): Android system Back on the auto-opened crop screen
           // must return here, keeping the picked photos, not close the app.
-          context.push('/crop');
+          context.push('/preview');
           return;
         }
         if (good.isEmpty && wasAutoOpen && mounted && context.canPop()) {
@@ -245,19 +250,19 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
                         if (target > 0)
                           PrimaryButton(
                             label: complete
-                                ? 'Crop & review  →'
+                                ? 'See preview  →'
                                 : 'Pick $remaining more to continue',
                             icon: complete
                                 ? Icons.arrow_forward_rounded
                                 : null,
                             onPressed: complete
-                                ? () => context.push('/crop')
+                                ? () => context.push('/preview')
                                 : null,
                           )
                         else if (!cart.isEmpty)
                           PrimaryButton(
                             label: 'Continue →',
-                            onPressed: () => context.push('/crop'),
+                            onPressed: () => context.push('/preview'),
                           ),
                       ],
                     ),

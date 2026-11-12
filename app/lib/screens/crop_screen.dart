@@ -479,7 +479,11 @@ class _CropScreenState extends State<CropScreen> {
                       onPressed: _save,
                       icon: const Icon(Icons.check_rounded, size: 18),
                       label: Text(
-                          _index >= total - 1 ? 'Crop · Done' : 'Crop · Next',
+                          _single
+                              ? 'Save crop'
+                              : (_index >= total - 1
+                                  ? 'Crop · Done'
+                                  : 'Crop · Next'),
                           style: const TextStyle(
                               fontSize: 13.5, fontWeight: FontWeight.w700)),
                       style: ElevatedButton.styleFrom(
@@ -499,8 +503,8 @@ class _CropScreenState extends State<CropScreen> {
                     child: OutlinedButton.icon(
                       onPressed: _autoCropRest,
                       icon: const Icon(Icons.auto_fix_high_rounded, size: 18),
-                      label: const Text('Auto crop all',
-                          style: TextStyle(
+                      label: Text(_single ? 'Auto fit' : 'Auto crop all',
+                          style: const TextStyle(
                               fontSize: 13.5, fontWeight: FontWeight.w600)),
                       style: OutlinedButton.styleFrom(
                         padding: const EdgeInsets.symmetric(vertical: 15),

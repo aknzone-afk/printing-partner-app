@@ -119,7 +119,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded),
           onPressed: () =>
-              context.canPop() ? context.pop() : context.go('/crop'),
+              context.canPop() ? context.pop() : context.go('/photos'),
         ),
         actions: [
           TextButton(
