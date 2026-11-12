@@ -30,7 +30,9 @@ class PreviewScreen extends StatefulWidget {
 }
 
 class _PreviewScreenState extends State<PreviewScreen> {
-  static const int _previewLongSide = 820;
+  // Sized for the on-screen card (a ~180-dp tile at 3x ≈ 540 px), not for
+  // print — small so a 54-photo set renders quickly instead of feeling hung.
+  static const int _previewLongSide = 560;
 
   /// One preview JPEG per cart photo, in cart order (null = that photo could
   /// not be rendered). Empty until the first render completes.

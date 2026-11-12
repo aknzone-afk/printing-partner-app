@@ -134,6 +134,19 @@ class Cart extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Set MANY crops at once with a SINGLE persist + notify. "Auto crop all" was
+  /// calling [setCrop] once per photo, and every call re-encodes the WHOLE cart
+  /// to JSON and writes it to disk + rebuilds the UI — doing that 50+ times in
+  /// a tight loop froze the app. Batching it is one encode, one write, one
+  /// rebuild.
+  void setCrops(Map<String, CropEdit> edits) {
+    if (edits.isEmpty) return;
+    _edits.addAll(edits);
+    _invalidatePdf();
+    _persist();
+    notifyListeners();
+  }
+
   /// True when every photo has been reviewed (either cropped or explicitly
   /// accepted with auto white padding).
   bool get allPhotosReady {

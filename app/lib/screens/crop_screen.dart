@@ -157,30 +157,69 @@ class _CropScreenState extends State<CropScreen> {
   }
 
   /// Auto-crop (centre, fill the frame) the current photo AND every still-
-  /// unreviewed photo, then jump to cart. Already-cropped photos (except the
-  /// one on screen) keep their manual crop. Auto-rotation is awaited first so
-  /// identical photos print identically.
+  /// unreviewed photo, then jump to the preview. Already-cropped photos (except
+  /// the one on screen) keep their manual crop.
+  ///
+  /// Big sets (50+ photos) must not freeze: the orientation probes run
+  /// CONCURRENTLY (bounded) instead of 50 awaits back-to-back, and every crop
+  /// is written in ONE [Cart.setCrops] batch (one persist + one rebuild)
+  /// instead of 50 separate [Cart.setCrop] calls that each re-encoded and
+  /// re-saved the whole cart — that per-photo write was the hang.
+  bool _autoCropping = false;
   Future<void> _autoCropRest() async {
-    final cart = context.read<Cart>();
-    final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
-    for (var i = 0; i < cart.items.length; i++) {
-      final item = cart.items[i];
-      if (i != _index && cart.cropFor(item.id) != null) continue;
-      try {
-        await _autoOrientIfNeeded(item, aspect);
-      } catch (_) {}
-      if (!mounted) return;
-      cart.setCrop(
-        item.id,
-        CropEdit.cropped(
-          offsetX: 0,
-          offsetY: 0,
-          scale: 1,
-          rotationSteps: _rotFor(item.id),
-        ),
-      );
+    if (_autoCropping) return;
+    _autoCropping = true;
+    try {
+      final cart = context.read<Cart>();
+      final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
+
+      // The photos to auto-crop: the current one + any not yet reviewed.
+      final targets = <PhotoItem>[];
+      for (var i = 0; i < cart.items.length; i++) {
+        final item = cart.items[i];
+        if (i != _index && cart.cropFor(item.id) != null) continue;
+        targets.add(item);
+      }
+
+      // Best-fit rotation for each, probed CONCURRENTLY in small batches so a
+      // 54-photo pack does not stall on 54 sequential decodes. Reuse a rotation
+      // the customer already set by hand.
+      final rotations = <String, int>{};
+      Future<void> probe(PhotoItem item) async {
+        if (_rotations.containsKey(item.id)) {
+          rotations[item.id] = _rotFor(item.id);
+          return;
+        }
+        try {
+          final size = await resolveImageSize(item.localPath);
+          rotations[item.id] = _bestRotation(size, aspect);
+        } catch (_) {
+          rotations[item.id] = 0;
+        }
+      }
+
+      for (var i = 0; i < targets.length; i += 6) {
+        final batch = targets.sublist(i, math.min(i + 6, targets.length));
+        await Future.wait(batch.map(probe));
+        if (!mounted) return;
+      }
+
+      // Write every crop in ONE batch (one encode + one disk write + one
+      // rebuild) — the per-photo write froze the UI on big sets.
+      final edits = <String, CropEdit>{
+        for (final item in targets)
+          item.id: CropEdit.cropped(
+            offsetX: 0,
+            offsetY: 0,
+            scale: 1,
+            rotationSteps: rotations[item.id] ?? 0,
+          ),
+      };
+      cart.setCrops(edits);
+      if (mounted) context.go('/preview');
+    } finally {
+      _autoCropping = false;
     }
-    if (mounted) context.go('/preview');
   }
 
   void _advance() {
