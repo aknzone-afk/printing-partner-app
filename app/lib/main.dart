@@ -21,6 +21,7 @@ import 'screens/order_chat_screen.dart';
 import 'screens/order_placed_screen.dart';
 import 'screens/packages_screen.dart';
 import 'screens/photo_picker_screen.dart';
+import 'screens/preview_screen.dart';
 import 'screens/upload_screen.dart';
 import 'theme.dart';
 
@@ -82,6 +83,7 @@ final GoRouter _router = GoRouter(
             int.tryParse(state.uri.queryParameters['i'] ?? '') ?? 0,
       ),
     ),
+    GoRoute(path: '/preview', builder: (_, __) => const PreviewScreen()),
     GoRoute(path: '/cart', builder: (_, __) => const CartScreen()),
     GoRoute(path: '/upload', builder: (_, __) => const UploadScreen()),
     GoRoute(path: '/address', builder: (_, __) => const AddressScreen()),

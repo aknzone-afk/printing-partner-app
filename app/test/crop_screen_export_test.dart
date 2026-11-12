@@ -73,6 +73,9 @@ void main() {
             path: '/cart',
             builder: (_, _) => const Scaffold(body: Text('CART PAGE'))),
         GoRoute(
+            path: '/preview',
+            builder: (_, _) => const Scaffold(body: Text('PREVIEW PAGE'))),
+        GoRoute(
             path: '/photos',
             builder: (_, _) => const Scaffold(body: Text('PHOTOS PAGE'))),
       ],
@@ -114,8 +117,8 @@ void main() {
     await tester.tap(find.text('Save · Done'));
     await tester.pump();
     await tester.pump();
-    expect(find.text('CART PAGE'), findsOneWidget,
-        reason: 'Save on the last photo returns to the cart');
+    expect(find.text('PREVIEW PAGE'), findsOneWidget,
+        reason: 'Save on the last photo goes to the print-preview page');
 
     final edit = cart.cropFor(id);
     expect(edit, isNotNull, reason: 'Save must record a crop for the photo');

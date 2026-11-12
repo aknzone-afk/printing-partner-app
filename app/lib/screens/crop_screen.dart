@@ -174,7 +174,7 @@ class _CropScreenState extends State<CropScreen> {
       cart.setCrop(
           item.id, CropEdit.skipped(rotationSteps: _rotFor(item.id)));
     }
-    if (mounted) context.go('/cart');
+    if (mounted) context.go('/preview');
   }
 
   /// Auto-crop (centre, fill the frame) the current photo AND every still-
@@ -201,13 +201,14 @@ class _CropScreenState extends State<CropScreen> {
         ),
       );
     }
-    if (mounted) context.go('/cart');
+    if (mounted) context.go('/preview');
   }
 
   void _advance() {
-    // Editing a single photo from the cart: one Save, back to the cart.
+    // Editing a single photo (from the cart or the preview page): one Save,
+    // pop back to wherever it was opened from.
     if (_single) {
-      context.go('/cart');
+      context.canPop() ? context.pop() : context.go('/preview');
       return;
     }
     final cart = context.read<Cart>();
@@ -226,7 +227,7 @@ class _CropScreenState extends State<CropScreen> {
         return;
       }
     }
-    context.go('/cart');
+    context.go('/preview');
   }
 
   void _zoomBy(double factor) {
