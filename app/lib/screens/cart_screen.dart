@@ -278,11 +278,13 @@ class _PhotoGridState extends State<_PhotoGrid> {
                 Builder(builder: (_) {
                   final cap = cart.selectedPack?.snapCount ?? 0;
                   final more = cap - cart.items.length;
+                  // Pack full → nothing to add, so don't show the button at all.
+                  if (more <= 0) return const SizedBox.shrink();
                   return TextButton.icon(
                     onPressed: () => context.push('/photos'),
                     icon: const Icon(Icons.add_photo_alternate_outlined,
                         size: 16),
-                    label: Text(more > 0 ? 'Add $more more' : 'Add photos'),
+                    label: Text('Add $more more'),
                   );
                 }),
                 TextButton.icon(

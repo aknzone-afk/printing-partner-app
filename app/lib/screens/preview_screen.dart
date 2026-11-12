@@ -145,7 +145,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => context.go('/cart'),
+            onPressed: () => context.push('/cart'),
             child: const Text('Cart'),
           ),
         ],
@@ -165,9 +165,12 @@ class _PreviewScreenState extends State<PreviewScreen> {
           : SafeArea(
               minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: PrimaryButton(
+                // Already reviewed + cropped here — skip the cart, go straight
+                // to delivery + payment. (The cart stays reachable via the
+                // "Cart" link above for add / remove.)
                 label: 'Looks good · Continue',
                 icon: Icons.arrow_forward_rounded,
-                onPressed: () => context.go('/cart'),
+                onPressed: () => context.push('/address'),
               ),
             ),
     );
