@@ -156,71 +156,6 @@ class _CropScreenState extends State<CropScreen> {
     _advance();
   }
 
-  /// Auto-crop (centre, fill the frame) the current photo AND every still-
-  /// unreviewed photo, then jump to the preview. Already-cropped photos (except
-  /// the one on screen) keep their manual crop.
-  ///
-  /// Big sets (50+ photos) must not freeze: the orientation probes run
-  /// CONCURRENTLY (bounded) instead of 50 awaits back-to-back, and every crop
-  /// is written in ONE [Cart.setCrops] batch (one persist + one rebuild)
-  /// instead of 50 separate [Cart.setCrop] calls that each re-encoded and
-  /// re-saved the whole cart — that per-photo write was the hang.
-  bool _autoCropping = false;
-  Future<void> _autoCropRest() async {
-    if (_autoCropping) return;
-    _autoCropping = true;
-    try {
-      final cart = context.read<Cart>();
-      final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
-
-      // The photos to auto-crop: the current one + any not yet reviewed.
-      final targets = <PhotoItem>[];
-      for (var i = 0; i < cart.items.length; i++) {
-        final item = cart.items[i];
-        if (i != _index && cart.cropFor(item.id) != null) continue;
-        targets.add(item);
-      }
-
-      // Best-fit rotation for each, probed CONCURRENTLY in small batches so a
-      // 54-photo pack does not stall on 54 sequential decodes. Reuse a rotation
-      // the customer already set by hand.
-      final rotations = <String, int>{};
-      Future<void> probe(PhotoItem item) async {
-        if (_rotations.containsKey(item.id)) {
-          rotations[item.id] = _rotFor(item.id);
-          return;
-        }
-        try {
-          final size = await resolveImageSize(item.localPath);
-          rotations[item.id] = _bestRotation(size, aspect);
-        } catch (_) {
-          rotations[item.id] = 0;
-        }
-      }
-
-      for (var i = 0; i < targets.length; i += 6) {
-        final batch = targets.sublist(i, math.min(i + 6, targets.length));
-        await Future.wait(batch.map(probe));
-        if (!mounted) return;
-      }
-
-      // Write every crop in ONE batch (one encode + one disk write + one
-      // rebuild) — the per-photo write froze the UI on big sets.
-      final edits = <String, CropEdit>{
-        for (final item in targets)
-          item.id: CropEdit.cropped(
-            offsetX: 0,
-            offsetY: 0,
-            scale: 1,
-            rotationSteps: rotations[item.id] ?? 0,
-          ),
-      };
-      cart.setCrops(edits);
-      if (mounted) context.go('/preview');
-    } finally {
-      _autoCropping = false;
-    }
-  }
 
   void _advance() {
     // Editing a single photo (from the cart or the preview page): one Save,
@@ -470,54 +405,28 @@ class _CropScreenState extends State<CropScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: Row(
-                children: [
-                  // LEFT (primary): keep THIS photo framed the way it is now and
-                  // move to the next one.
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _save,
-                      icon: const Icon(Icons.check_rounded, size: 18),
-                      label: Text(
-                          _single
-                              ? 'Save crop'
-                              : (_index >= total - 1
-                                  ? 'Crop · Done'
-                                  : 'Crop · Next'),
-                          style: const TextStyle(
-                              fontSize: 13.5, fontWeight: FontWeight.w700)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 15),
-                        minimumSize: const Size(0, 52),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
-                      ),
-                    ),
+              // Just Save: the customer zooms / drags / rotates with the controls
+              // on the right, then saves THIS photo and goes straight back to the
+              // preview. (No "Auto fit" here — every photo already arrives
+              // auto-fit on the preview.)
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _save,
+                  icon: const Icon(Icons.check_rounded, size: 20),
+                  label: const Text('Save crop',
+                      style:
+                          TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    minimumSize: const Size(0, 54),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
                   ),
-                  const SizedBox(width: 10),
-                  // RIGHT: auto-fit EVERY remaining photo at once (quick path).
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: _autoCropRest,
-                      icon: const Icon(Icons.auto_fix_high_rounded, size: 18),
-                      label: Text(_single ? 'Auto fit' : 'Auto crop all',
-                          style: const TextStyle(
-                              fontSize: 13.5, fontWeight: FontWeight.w600)),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 15),
-                        minimumSize: const Size(0, 52),
-                        foregroundColor: AppColors.primary,
-                        side: const BorderSide(
-                            color: AppColors.primary, width: 1.5),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ],
@@ -598,8 +507,7 @@ class _Hint extends StatelessWidget {
           const SizedBox(width: 6),
           Expanded(
             child: Text(
-              'Drag, zoom or rotate to fit $dimensions — then Crop · Next. '
-              'Or tap Auto crop all.',
+              'Drag, zoom in/out or rotate to frame $dimensions, then Save.',
               style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,

@@ -135,6 +135,44 @@ Future<List<Uint8List>> renderCroppedJpegs(
   return results.cast<Uint8List>();
 }
 
+/// Render just ONE cart photo to a preview JPEG — the SAME pipeline as
+/// [renderCroppedJpegs] — so the preview can refresh only the tile the customer
+/// just edited instead of re-rendering the whole set. Returns null on any
+/// failure (the caller keeps the old tile).
+Future<Uint8List?> renderOneCroppedJpeg(
+  Cart cart,
+  int index, {
+  int? maxLongSide,
+  int jpegQuality = 88,
+  int maxBytes = 11 * 1024 * 1024,
+}) async {
+  final pack = cart.selectedPack;
+  if (pack == null) return null;
+  final items = cart.items;
+  if (index < 0 || index >= items.length) return null;
+  final aspect = pack.size.imageAspectWxH;
+  final longSide = maxLongSide ?? printLongSideFor(pack.size);
+  final outputCap = maxLongSide ?? 4000;
+  final edit = cart.cropFor(items[index].id) ?? const CropEdit.skipped();
+  final rootToken = kIsWeb ? null : RootIsolateToken.instance;
+  try {
+    return await _renderItem(
+      items[index].localPath,
+      edit,
+      index,
+      total: items.length,
+      aspect: aspect,
+      longSide: longSide,
+      outputCap: outputCap,
+      jpegQuality: jpegQuality,
+      maxBytes: maxBytes,
+      rootToken: rootToken,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Renders ONE cart photo to a print-ready JPEG: bound the source to the print
 /// budget, run the crop (native transcode fallback for HEIC), then step the
 /// quality down until the file fits [maxBytes]. Throws a customer-facing

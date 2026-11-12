@@ -50,14 +50,36 @@ class _PreviewScreenState extends State<PreviewScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _render());
   }
 
+  // Only the photo SET (ids + pack), NOT the crops: a single re-crop refreshes
+  // just its own tile (see [_editPhoto]); only add / remove triggers a full
+  // render. So returning from the crop screen never re-renders the whole page.
   String _signatureOf(Cart cart) {
     final b = StringBuffer(cart.selectedPack?.size.label ?? '-');
     for (final it in cart.items) {
-      b
-        ..write(it.id)
-        ..write(cart.cropFor(it.id)?.hashCode ?? 0);
+      b.write(it.id);
     }
     return b.toString();
+  }
+
+  /// Open ONE photo in the crop screen, then refresh ONLY that tile when it
+  /// comes back — the page never re-renders (no flash, instant even on 54
+  /// photos). A failed render leaves the old tile in place.
+  Future<void> _editPhoto(int i) async {
+    await context.push('/crop?i=$i');
+    if (!mounted) return;
+    final cart = context.read<Cart>();
+    if (i < 0 || i >= cart.items.length) return;
+    final jpg = await renderOneCroppedJpeg(
+      cart,
+      i,
+      maxLongSide: _previewLongSide,
+      jpegQuality: 86,
+    );
+    if (!mounted) return;
+    setState(() {
+      final list = _previews;
+      if (list != null && i < list.length) list[i] = jpg;
+    });
   }
 
   Future<void> _render() async {
@@ -131,7 +153,12 @@ class _PreviewScreenState extends State<PreviewScreen> {
       body: SafeArea(
         child: previews == null
             ? _RenderingView(done: _done, total: _total, error: _error)
-            : _ResultGrid(cart: cart, pack: pack, previews: previews),
+            : _ResultGrid(
+                cart: cart,
+                pack: pack,
+                previews: previews,
+                onEditPhoto: _editPhoto,
+              ),
       ),
       bottomNavigationBar: previews == null
           ? null
@@ -217,10 +244,12 @@ class _ResultGrid extends StatelessWidget {
     required this.cart,
     required this.pack,
     required this.previews,
+    required this.onEditPhoto,
   });
   final Cart cart;
   final PrintPack pack;
   final List<Uint8List?> previews;
+  final void Function(int index) onEditPhoto;
 
   @override
   Widget build(BuildContext context) {
@@ -267,7 +296,7 @@ class _ResultGrid extends StatelessWidget {
                 total: count,
                 pack: pack,
                 jpg: previews.length > i ? previews[i] : null,
-                onTap: () => context.push('/crop?i=$i'),
+                onTap: () => onEditPhoto(i),
               ),
               childCount: count,
             ),
@@ -371,20 +400,9 @@ class _PrintCard extends StatelessWidget {
   }
 
   Widget _print() {
-    final isPolaroid = pack.size.hasPolaroidStrip;
-    final shadow = [
-      BoxShadow(
-        color: Colors.black.withValues(alpha: 0.18),
-        blurRadius: 10,
-        offset: const Offset(0, 5),
-      ),
-    ];
-
-    if (isPolaroid) {
+    if (pack.size.hasPolaroidStrip) {
       // The SAME white Polaroid card the packages screen shows (shared
-      // PolaroidFrame.forSize), so the result here matches what the customer
-      // picked from. The outer Transform.rotate applies the tilt, so the frame
-      // itself stays upright (rotationDeg: 0).
+      // PolaroidFrame.forSize). The outer Transform.rotate applies the tilt.
       return PolaroidFrame.forSize(
         size: pack.size,
         rotationDeg: 0,
@@ -393,14 +411,37 @@ class _PrintCard extends StatelessWidget {
       );
     }
 
-    // Photos / Snapbook: a glossy print with a thin white border, edge-to-edge
-    // image at the print's own aspect.
-    return Container(
-      padding: const EdgeInsets.all(5),
-      decoration: BoxDecoration(color: Colors.white, boxShadow: shadow),
+    // Photo / Snapbook: a LUXURY framed print — a soft gold border over a white
+    // mat, a layered drop shadow and gently rounded corners — so the preview
+    // reads like a real framed photograph. The image inside is the EXACT print
+    // (BoxFit.contain, white where the photo doesn't fill the print shape).
+    return Center(
       child: AspectRatio(
         aspectRatio: pack.size.imageAspectWxH,
-        child: _image(BoxFit.contain),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: const Color(0xFFD9C38A), width: 1.4),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.22),
+                blurRadius: 16,
+                offset: const Offset(0, 8),
+              ),
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.07),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: _image(BoxFit.contain),
+          ),
+        ),
       ),
     );
   }
