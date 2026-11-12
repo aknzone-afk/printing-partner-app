@@ -1,11 +1,15 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
 import '../models/cart.dart';
+import '../models/print_packages.dart';
+import '../services/photo_export.dart';
 import '../theme.dart';
-import '../widgets/photo_thumb.dart';
 import '../widgets/primary_button.dart';
+import '../widgets/print_result_view.dart';
 
 class CartScreen extends StatelessWidget {
   const CartScreen({super.key});
@@ -118,9 +122,71 @@ class _PackBanner extends StatelessWidget {
   }
 }
 
-class _PhotoGrid extends StatelessWidget {
+/// The cart's "Your selection" grid. Each tile is the photo's ACTUAL print
+/// result (same `renderCroppedJpegs` + `PrintResultView` the preview page uses,
+/// so it looks identical) with a remove (✕) button and an Edit button that
+/// opens the crop screen (crop / Auto crop / zoom / rotate) for that photo.
+class _PhotoGrid extends StatefulWidget {
   const _PhotoGrid({required this.cart});
   final Cart cart;
+
+  @override
+  State<_PhotoGrid> createState() => _PhotoGridState();
+}
+
+class _PhotoGridState extends State<_PhotoGrid> {
+  /// One preview JPEG per cart photo, in cart order (null = not rendered yet).
+  List<Uint8List?>? _previews;
+  String _sig = '';
+  bool _rendering = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _render());
+  }
+
+  String _signatureOf(Cart cart) {
+    final b = StringBuffer(cart.selectedPack?.size.label ?? '-');
+    for (final it in cart.items) {
+      b
+        ..write(it.id)
+        ..write(cart.cropFor(it.id)?.hashCode ?? 0);
+    }
+    return b.toString();
+  }
+
+  Future<void> _render() async {
+    final cart = widget.cart;
+    final sig = _signatureOf(cart);
+    if (cart.selectedPack == null || cart.isEmpty) {
+      if (mounted) setState(() => _sig = sig);
+      return;
+    }
+    setState(() {
+      _sig = sig;
+      _rendering = true;
+    });
+    try {
+      // Small, quick render on the native codec; the full-res upload render
+      // still happens later at checkout.
+      final jpgs = await renderCroppedJpegs(
+        cart,
+        maxLongSide: 560,
+        jpegQuality: 84,
+      );
+      if (!mounted || _sig != sig) return;
+      setState(() {
+        _previews = List<Uint8List?>.from(jpgs);
+        _rendering = false;
+      });
+    } catch (_) {
+      // Leave placeholders; tiles stay editable and the order still validates
+      // every photo at upload.
+      if (!mounted || _sig != sig) return;
+      setState(() => _rendering = false);
+    }
+  }
 
   Future<void> _confirmClearAll(BuildContext context, Cart cart) async {
     final ok = await showDialog<bool>(
@@ -147,6 +213,7 @@ class _PhotoGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cart = widget.cart;
     if (cart.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24),
@@ -168,7 +235,15 @@ class _PhotoGrid extends StatelessWidget {
       );
     }
 
-    final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1.0;
+    // Re-render the previews if the cart changed under us (add / remove /
+    // re-crop) — the signature no longer matches what we last rendered.
+    if (_sig != _signatureOf(cart)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _render();
+      });
+    }
+    final pack = cart.selectedPack!;
+    final previews = _previews;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -209,84 +284,160 @@ class _PhotoGrid extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 8),
+        if (_rendering)
+          const Padding(
+            padding: EdgeInsets.only(top: 6, bottom: 2),
+            child: LinearProgressIndicator(
+              minHeight: 3,
+              backgroundColor: AppColors.lavender,
+            ),
+          ),
+        const SizedBox(height: 10),
         GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 8,
-            mainAxisSpacing: 8,
-            childAspectRatio: aspect,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            crossAxisSpacing: 14,
+            mainAxisSpacing: 16,
+            childAspectRatio: 0.72,
           ),
           itemCount: cart.items.length,
           itemBuilder: (context, index) {
             final item = cart.items[index];
-            final edit = cart.cropFor(item.id);
+            final jpg = (previews != null && previews.length > index)
+                ? previews[index]
+                : null;
             final position = 'Photo ${index + 1} of ${cart.items.length}';
-            return GestureDetector(
-              onTap: () => context.push('/crop?i=$index'),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      color: Colors.white,
-                      child: PhotoThumb(
-                        path: item.localPath,
-                        semanticLabel: '$position. Tap to edit crop',
-                        // Show as it'll print: cover for cropped, contain for skipped
-                        fit: (edit != null && edit.skipped)
-                            ? BoxFit.contain
-                            : BoxFit.cover,
-                      ),
+            final tilt = (index.isEven ? -1.0 : 1.0) * 0.012;
+            return _SelectionTile(
+              jpg: jpg,
+              size: pack.size,
+              position: position,
+              tilt: tilt,
+              onEdit: () => context.push('/crop?i=$index'),
+              onRemove: () => cart.remove(item.id),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// One cart-selection tile: the photo's real print result ([PrintResultView])
+/// with a remove (✕) button and an Edit button that opens the crop screen
+/// (crop / Auto crop / zoom / rotate). Tapping anywhere on the tile edits.
+class _SelectionTile extends StatelessWidget {
+  const _SelectionTile({
+    required this.jpg,
+    required this.size,
+    required this.position,
+    required this.tilt,
+    required this.onEdit,
+    required this.onRemove,
+  });
+  final Uint8List? jpg;
+  final PrintSize size;
+  final String position;
+  final double tilt;
+  final VoidCallback onEdit;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onEdit,
+      child: Transform.rotate(
+        angle: tilt,
+        child: SizedBox.expand(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: PrintResultView(jpg: jpg, size: size),
+              ),
+              // Edit pill (bottom-right) — crop / Auto crop / zoom / rotate.
+              Positioned(
+                right: 8,
+                bottom: 8,
+                child: GestureDetector(
+                  onTap: onEdit,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.25),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.crop_rotate_rounded,
+                            size: 13, color: Colors.white),
+                        SizedBox(width: 4),
+                        Text('Edit',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700)),
+                      ],
                     ),
                   ),
-                  // Remove: the visible badge stays 24 dp but the hit area
-                  // is a full 48-dp square anchored to the top-right corner.
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: Semantics(
-                      button: true,
-                      label: 'Remove $position',
-                      child: Tooltip(
-                        message: 'Remove photo',
-                        child: Material(
-                          color: Colors.transparent,
-                          child: InkWell(
-                            customBorder: const CircleBorder(),
-                            onTap: () => cart.remove(item.id),
-                            child: SizedBox(
-                              width: 48,
-                              height: 48,
-                              child: Align(
-                                alignment: const Alignment(0.6, -0.6),
-                                child: Container(
-                                  width: 24,
-                                  height: 24,
-                                  decoration: BoxDecoration(
-                                    color:
-                                        Colors.black.withValues(alpha: 0.55),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(Icons.close,
-                                      size: 14, color: Colors.white),
-                                ),
+                ),
+              ),
+              // Remove (✕) — 44-dp hit area, 26-dp visible badge, top-right.
+              Positioned(
+                top: 0,
+                right: 0,
+                child: Semantics(
+                  button: true,
+                  label: 'Remove $position',
+                  child: Tooltip(
+                    message: 'Remove photo',
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        customBorder: const CircleBorder(),
+                        onTap: onRemove,
+                        child: SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: Align(
+                            alignment: const Alignment(0.75, -0.75),
+                            child: Container(
+                              width: 26,
+                              height: 26,
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.6),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.2),
+                                      blurRadius: 3),
+                                ],
                               ),
+                              child: const Icon(Icons.close,
+                                  size: 16, color: Colors.white),
                             ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ],
+                ),
               ),
-            );
-          },
+            ],
+          ),
         ),
-      ],
+      ),
     );
   }
 }
@@ -374,38 +525,6 @@ class _CartSummary extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _Row extends StatelessWidget {
-  const _Row(
-      {required this.label,
-      required this.value,
-      this.bold = false,
-      this.valueColor});
-  final String label;
-  final String value;
-  final bool bold;
-  final Color? valueColor;
-  @override
-  Widget build(BuildContext context) {
-    final style = TextStyle(
-      fontSize: bold ? 18 : 14,
-      fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
-      color: valueColor ?? AppColors.textPrimary,
-    );
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(label,
-            style: TextStyle(
-              fontSize: bold ? 18 : 14,
-              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
-              color: AppColors.textPrimary,
-            )),
-        Text(value, style: style),
-      ],
     );
   }
 }
