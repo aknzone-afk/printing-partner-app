@@ -462,8 +462,8 @@ class _CropScreenState extends State<CropScreen> {
                           icon: const Icon(
                               Icons.format_color_fill_outlined,
                               size: 18),
-                          label: Text(_single ? 'White pad' : 'Skip the rest',
-                              style: const TextStyle(fontSize: 13)),
+                          label: const Text('White crop',
+                              style: TextStyle(fontSize: 13)),
                           style: OutlinedButton.styleFrom(
                             padding:
                                 const EdgeInsets.symmetric(vertical: 14),
@@ -477,8 +477,8 @@ class _CropScreenState extends State<CropScreen> {
                           onPressed: _autoCropRest,
                           icon: const Icon(Icons.auto_fix_high_outlined,
                               size: 18),
-                          label: Text(_single ? 'Auto crop' : 'Auto-crop the rest',
-                              style: const TextStyle(fontSize: 13)),
+                          label: const Text('Auto crop',
+                              style: TextStyle(fontSize: 13)),
                           style: OutlinedButton.styleFrom(
                             padding:
                                 const EdgeInsets.symmetric(vertical: 14),
