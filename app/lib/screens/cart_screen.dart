@@ -137,8 +137,12 @@ class _PhotoGrid extends StatefulWidget {
 class _PhotoGridState extends State<_PhotoGrid> {
   /// One preview JPEG per cart photo, in cart order (null = not rendered yet).
   List<Uint8List?>? _previews;
+  // Only the photo SET (ids), NOT the crops: a re-crop refreshes just its own
+  // tile (see [_editTile]); only add / remove triggers a full render.
   String _sig = '';
-  bool _rendering = false;
+  // Indices currently re-rendering after an edit — a spinner shows ON that tile
+  // (there is no top loading line).
+  final Set<int> _busy = <int>{};
 
   @override
   void initState() {
@@ -149,9 +153,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
   String _signatureOf(Cart cart) {
     final b = StringBuffer(cart.selectedPack?.size.label ?? '-');
     for (final it in cart.items) {
-      b
-        ..write(it.id)
-        ..write(cart.cropFor(it.id)?.hashCode ?? 0);
+      b.write(it.id);
     }
     return b.toString();
   }
@@ -163,29 +165,39 @@ class _PhotoGridState extends State<_PhotoGrid> {
       if (mounted) setState(() => _sig = sig);
       return;
     }
-    setState(() {
-      _sig = sig;
-      _rendering = true;
-    });
+    setState(() => _sig = sig);
     try {
-      // Small, quick render on the native codec; the full-res upload render
-      // still happens later at checkout.
       final jpgs = await renderCroppedJpegs(
         cart,
         maxLongSide: 560,
         jpegQuality: 84,
       );
       if (!mounted || _sig != sig) return;
-      setState(() {
-        _previews = List<Uint8List?>.from(jpgs);
-        _rendering = false;
-      });
+      setState(() => _previews = List<Uint8List?>.from(jpgs));
     } catch (_) {
       // Leave placeholders; tiles stay editable and the order still validates
       // every photo at upload.
-      if (!mounted || _sig != sig) return;
-      setState(() => _rendering = false);
     }
+  }
+
+  /// Open ONE photo in the crop screen, then re-render ONLY that tile when it
+  /// returns — a spinner shows on the tile while it renders; the rest of the
+  /// grid never re-renders (no top loading line).
+  Future<void> _editTile(int i) async {
+    await context.push('/crop?i=$i');
+    if (!mounted) return;
+    final cart = widget.cart;
+    if (i < 0 || i >= cart.items.length) return;
+    setState(() => _busy.add(i));
+    final jpg =
+        await renderOneCroppedJpeg(cart, i, maxLongSide: 560, jpegQuality: 84);
+    if (!mounted) return;
+    setState(() {
+      final list = _previews;
+      if (list != null && i < list.length) list[i] = jpg;
+      _busy.remove(i);
+      _sig = _signatureOf(cart);
+    });
   }
 
   Future<void> _confirmClearAll(BuildContext context, Cart cart) async {
@@ -284,15 +296,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
             ),
           ],
         ),
-        if (_rendering)
-          const Padding(
-            padding: EdgeInsets.only(top: 6, bottom: 2),
-            child: LinearProgressIndicator(
-              minHeight: 3,
-              backgroundColor: AppColors.lavender,
-            ),
-          ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
         GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
@@ -315,7 +319,8 @@ class _PhotoGridState extends State<_PhotoGrid> {
               size: pack.size,
               position: position,
               tilt: tilt,
-              onEdit: () => context.push('/crop?i=$index'),
+              busy: _busy.contains(index),
+              onEdit: () => _editTile(index),
               onRemove: () => cart.remove(item.id),
             );
           },
@@ -334,6 +339,7 @@ class _SelectionTile extends StatelessWidget {
     required this.size,
     required this.position,
     required this.tilt,
+    required this.busy,
     required this.onEdit,
     required this.onRemove,
   });
@@ -341,6 +347,7 @@ class _SelectionTile extends StatelessWidget {
   final PrintSize size;
   final String position;
   final double tilt;
+  final bool busy;
   final VoidCallback onEdit;
   final VoidCallback onRemove;
 
@@ -356,6 +363,25 @@ class _SelectionTile extends StatelessWidget {
               Positioned.fill(
                 child: PrintResultView(jpg: jpg, size: size),
               ),
+              // While this one photo re-renders after an edit (or on first
+              // load), a spinner sits ON the tile — no top loading line.
+              if (busy || jpg == null)
+                Positioned.fill(
+                  child: ColoredBox(
+                    color: Colors.white.withValues(alpha: 0.55),
+                    child: const Center(
+                      child: SizedBox(
+                        width: 26,
+                        height: 26,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 3,
+                          valueColor:
+                              AlwaysStoppedAnimation(AppColors.primary),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               // Edit pill (bottom-right) — crop / Auto crop / zoom / rotate.
               Positioned(
                 right: 8,

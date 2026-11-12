@@ -594,33 +594,68 @@ class _ThumbStrip extends StatelessWidget {
 }
 
 class _CropFramePainter extends CustomPainter {
+  // Draw each segment as a BLACK line over a thin WHITE halo, so the grid is
+  // visible on ANY background: the photo, OR the white padding around a
+  // contained photo (where a plain white grid was invisible).
+  void _strokeAll(Canvas canvas, List<List<Offset>> segs, Paint halo,
+      Paint line) {
+    for (final s in segs) {
+      canvas.drawLine(s[0], s[1], halo);
+    }
+    for (final s in segs) {
+      canvas.drawLine(s[0], s[1], line);
+    }
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
-    final grid = Paint()
-      ..color = Colors.white.withValues(alpha: 0.5)
-      ..strokeWidth = 1
-      ..style = PaintingStyle.stroke;
-    canvas.drawLine(Offset(w / 3, 0), Offset(w / 3, h), grid);
-    canvas.drawLine(Offset(2 * w / 3, 0), Offset(2 * w / 3, h), grid);
-    canvas.drawLine(Offset(0, h / 3), Offset(w, h / 3), grid);
-    canvas.drawLine(Offset(0, 2 * h / 3), Offset(w, 2 * h / 3), grid);
 
-    final corner = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    const cornerLen = 18.0;
-    canvas.drawLine(const Offset(0, 0), const Offset(cornerLen, 0), corner);
-    canvas.drawLine(const Offset(0, 0), const Offset(0, cornerLen), corner);
-    canvas.drawLine(Offset(w, 0), Offset(w - cornerLen, 0), corner);
-    canvas.drawLine(Offset(w, 0), Offset(w, cornerLen), corner);
-    canvas.drawLine(Offset(0, h), Offset(cornerLen, h), corner);
-    canvas.drawLine(Offset(0, h), Offset(0, h - cornerLen), corner);
-    canvas.drawLine(Offset(w, h), Offset(w - cornerLen, h), corner);
-    canvas.drawLine(Offset(w, h), Offset(w, h - cornerLen), corner);
+    // Rule-of-thirds grid.
+    _strokeAll(
+      canvas,
+      <List<Offset>>[
+        [Offset(w / 3, 0), Offset(w / 3, h)],
+        [Offset(2 * w / 3, 0), Offset(2 * w / 3, h)],
+        [Offset(0, h / 3), Offset(w, h / 3)],
+        [Offset(0, 2 * h / 3), Offset(w, 2 * h / 3)],
+      ],
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.7)
+        ..strokeWidth = 2
+        ..style = PaintingStyle.stroke,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.6)
+        ..strokeWidth = 1
+        ..style = PaintingStyle.stroke,
+    );
+
+    // Corner brackets.
+    const c = 18.0;
+    _strokeAll(
+      canvas,
+      <List<Offset>>[
+        [const Offset(0, 0), const Offset(c, 0)],
+        [const Offset(0, 0), const Offset(0, c)],
+        [Offset(w, 0), Offset(w - c, 0)],
+        [Offset(w, 0), Offset(w, c)],
+        [Offset(0, h), Offset(c, h)],
+        [Offset(0, h), Offset(0, h - c)],
+        [Offset(w, h), Offset(w - c, h)],
+        [Offset(w, h), Offset(w, h - c)],
+      ],
+      Paint()
+        ..color = Colors.white.withValues(alpha: 0.85)
+        ..strokeWidth = 4.5
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round,
+      Paint()
+        ..color = Colors.black
+        ..strokeWidth = 2.5
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round,
+    );
   }
 
   @override
