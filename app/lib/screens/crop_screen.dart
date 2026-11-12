@@ -10,7 +10,6 @@ import '../models/photo_item.dart';
 import '../services/photo_export.dart';
 import '../theme.dart';
 import '../widgets/photo_thumb.dart';
-import '../widgets/primary_button.dart';
 
 /// Per-photo crop screen.
 /// • Drag to pan (within zoomed view).
@@ -155,26 +154,6 @@ class _CropScreenState extends State<CropScreen> {
       );
     }
     _advance();
-  }
-
-  /// White-pad the current photo AND every still-unreviewed photo, then jump to
-  /// cart. Photos the customer already cropped are left untouched (except the
-  /// one on screen). Each photo's auto-rotation is awaited first so a
-  /// never-opened landscape photo is still rotated to fill the frame.
-  Future<void> _skipRest() async {
-    final cart = context.read<Cart>();
-    final aspect = cart.selectedPack?.size.imageAspectWxH ?? 1;
-    for (var i = 0; i < cart.items.length; i++) {
-      final item = cart.items[i];
-      if (i != _index && cart.cropFor(item.id) != null) continue;
-      try {
-        await _autoOrientIfNeeded(item, aspect);
-      } catch (_) {}
-      if (!mounted) return;
-      cart.setCrop(
-          item.id, CropEdit.skipped(rotationSteps: _rotFor(item.id)));
-    }
-    if (mounted) context.go('/preview');
   }
 
   /// Auto-crop (centre, fill the frame) the current photo AND every still-
@@ -452,49 +431,48 @@ class _CropScreenState extends State<CropScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: Column(
+              child: Row(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: _skipRest,
-                          icon: const Icon(
-                              Icons.format_color_fill_outlined,
-                              size: 18),
-                          label: const Text('White crop',
-                              style: TextStyle(fontSize: 13)),
-                          style: OutlinedButton.styleFrom(
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 14),
-                            minimumSize: const Size(0, 48),
-                          ),
-                        ),
+                  // LEFT (primary): keep THIS photo framed the way it is now and
+                  // move to the next one.
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _save,
+                      icon: const Icon(Icons.check_rounded, size: 18),
+                      label: Text(
+                          _index >= total - 1 ? 'Crop · Done' : 'Crop · Next',
+                          style: const TextStyle(
+                              fontSize: 13.5, fontWeight: FontWeight.w700)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        minimumSize: const Size(0, 52),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: _autoCropRest,
-                          icon: const Icon(Icons.auto_fix_high_outlined,
-                              size: 18),
-                          label: const Text('Auto crop',
-                              style: TextStyle(fontSize: 13)),
-                          style: OutlinedButton.styleFrom(
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 14),
-                            minimumSize: const Size(0, 48),
-                            foregroundColor: AppColors.primary,
-                            side: const BorderSide(color: AppColors.primary),
-                          ),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  PrimaryButton(
-                    label: _index >= total - 1 ? 'Save · Done' : 'Save · Next',
-                    icon: Icons.check_rounded,
-                    onPressed: _save,
+                  const SizedBox(width: 10),
+                  // RIGHT: auto-fit EVERY remaining photo at once (quick path).
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _autoCropRest,
+                      icon: const Icon(Icons.auto_fix_high_rounded, size: 18),
+                      label: const Text('Auto crop all',
+                          style: TextStyle(
+                              fontSize: 13.5, fontWeight: FontWeight.w600)),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 15),
+                        minimumSize: const Size(0, 52),
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(
+                            color: AppColors.primary, width: 1.5),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -577,7 +555,8 @@ class _Hint extends StatelessWidget {
           const SizedBox(width: 6),
           Expanded(
             child: Text(
-              'Drag · zoom · rotate to fit $dimensions, or Skip for white space.',
+              'Drag, zoom or rotate to fit $dimensions — then Crop · Next. '
+              'Or tap Auto crop all.',
               style: const TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
