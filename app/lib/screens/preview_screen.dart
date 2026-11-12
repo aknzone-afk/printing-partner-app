@@ -40,6 +40,9 @@ class _PreviewScreenState extends State<PreviewScreen> {
   int _done = 0;
   int _total = 0;
   String? _error;
+  // Tiles currently re-rendering after an edit — each shows a centered spinner
+  // over its old image until the new crop (zoom-in) finishes rendering.
+  final Set<int> _busy = <int>{};
   // Guards against a stale render (cart changed while rendering) overwriting a
   // fresh one, and against setState after dispose.
   String _sig = '';
@@ -69,17 +72,24 @@ class _PreviewScreenState extends State<PreviewScreen> {
     if (!mounted) return;
     final cart = context.read<Cart>();
     if (i < 0 || i >= cart.items.length) return;
-    final jpg = await renderOneCroppedJpeg(
-      cart,
-      i,
-      maxLongSide: _previewLongSide,
-      jpegQuality: 86,
-    );
-    if (!mounted) return;
-    setState(() {
-      final list = _previews;
-      if (list != null && i < list.length) list[i] = jpg;
-    });
+    // Show a spinner in the middle of this tile while the new crop renders, so
+    // the customer sees it's working (not frozen) until the zoom-in appears.
+    setState(() => _busy.add(i));
+    try {
+      final jpg = await renderOneCroppedJpeg(
+        cart,
+        i,
+        maxLongSide: _previewLongSide,
+        jpegQuality: 86,
+      );
+      if (!mounted) return;
+      setState(() {
+        final list = _previews;
+        if (list != null && i < list.length) list[i] = jpg;
+      });
+    } finally {
+      if (mounted) setState(() => _busy.remove(i));
+    }
   }
 
   Future<void> _render() async {
@@ -143,12 +153,6 @@ class _PreviewScreenState extends State<PreviewScreen> {
           onPressed: () =>
               context.canPop() ? context.pop() : context.go('/photos'),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => context.push('/cart'),
-            child: const Text('Cart'),
-          ),
-        ],
       ),
       body: SafeArea(
         child: previews == null
@@ -157,6 +161,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
                 cart: cart,
                 pack: pack,
                 previews: previews,
+                busy: _busy,
                 onEditPhoto: _editPhoto,
               ),
       ),
@@ -166,8 +171,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
               minimum: const EdgeInsets.fromLTRB(16, 8, 16, 12),
               child: PrimaryButton(
                 // Already reviewed + cropped here — skip the cart, go straight
-                // to delivery + payment. (The cart stays reachable via the
-                // "Cart" link above for add / remove.)
+                // to delivery + payment.
                 label: 'Looks good · Continue',
                 icon: Icons.arrow_forward_rounded,
                 onPressed: () => context.push('/address'),
@@ -247,11 +251,13 @@ class _ResultGrid extends StatelessWidget {
     required this.cart,
     required this.pack,
     required this.previews,
+    required this.busy,
     required this.onEditPhoto,
   });
   final Cart cart;
   final PrintPack pack;
   final List<Uint8List?> previews;
+  final Set<int> busy;
   final void Function(int index) onEditPhoto;
 
   @override
@@ -299,6 +305,7 @@ class _ResultGrid extends StatelessWidget {
                 total: count,
                 pack: pack,
                 jpg: previews.length > i ? previews[i] : null,
+                busy: busy.contains(i),
                 warn: i < cart.items.length &&
                     (cart.cropFor(cart.items[i].id)?.skipped ?? true),
                 onTap: () => onEditPhoto(i),
@@ -321,6 +328,7 @@ class _PrintCard extends StatelessWidget {
     required this.total,
     required this.pack,
     required this.jpg,
+    required this.busy,
     required this.warn,
     required this.onTap,
   });
@@ -328,6 +336,7 @@ class _PrintCard extends StatelessWidget {
   final int total;
   final PrintPack pack;
   final Uint8List? jpg;
+  final bool busy;
   final bool warn;
   final VoidCallback onTap;
 
@@ -434,6 +443,22 @@ class _PrintCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  // A round spinner in the MIDDLE of the tile while this photo
+                  // re-renders after an edit — stays until the new crop appears.
+                  if (busy)
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: Colors.white.withValues(alpha: 0.55),
+                        child: const Center(
+                          child: SizedBox(
+                            width: 30,
+                            height: 30,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 3),
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
