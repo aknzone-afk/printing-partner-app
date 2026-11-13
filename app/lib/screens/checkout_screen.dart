@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -453,7 +454,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   /// True when the owner is demoing: the customer name is "TEST"/"TESTY".
+  /// Gated to DEBUG builds only — in a release / store build this always
+  /// returns false, so a real customer can never skip payment by naming
+  /// themselves "test".
   bool get _isTestOrder {
+    if (!kDebugMode) return false;
     final n = context.read<Cart>().customerName.trim().toLowerCase();
     return n == 'test' || n == 'testy';
   }
@@ -857,7 +862,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final showSetup = _placedOrderId == null && _backendReady != true;
     // Owner test: name is "TEST"/"TESTY" -> hide the payment gateway and place
     // the order directly (fresh order only; a placed order's retry is normal).
-    final testMode = _placedOrderId == null &&
+    final testMode = kDebugMode &&
+        _placedOrderId == null &&
         (cart.customerName.trim().toLowerCase() == 'test' ||
             cart.customerName.trim().toLowerCase() == 'testy');
 
