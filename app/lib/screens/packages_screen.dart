@@ -198,6 +198,16 @@ class _PackPill extends StatelessWidget {
                   color: AppColors.textPrimary,
                 ),
               ),
+              // Per-snap price so the customer can compare 18 / 36 / 54 packs at
+              // a glance — the bigger pack's lower per-snap cost drives upsells.
+              Text(
+                pack.perUnitLabel,
+                style: const TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textSecondary,
+                ),
+              ),
             ],
           ),
         ),
