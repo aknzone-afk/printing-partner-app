@@ -45,6 +45,7 @@ class _AddressScreenState extends State<AddressScreen> {
     _city.text = cart.city;
     _state.text = cart.state;
     _pincode.text = cart.pincode;
+    _lastPin = cart.pincode;
     if (cart.pincode.length == 6) _pincodeOk = true;
     _pincode.addListener(_onPincodeChanged);
   }
@@ -59,8 +60,15 @@ class _AddressScreenState extends State<AddressScreen> {
     super.dispose();
   }
 
+  // Last pincode we actually handled. A TextEditingController notifies on
+  // cursor / selection changes too, not just edits — without this, tapping back
+  // into the field would re-run the lookup and overwrite manual City/State.
+  String _lastPin = '';
+
   void _onPincodeChanged() {
     final value = _pincode.text;
+    if (value == _lastPin) return; // text unchanged (cursor/focus) — ignore
+    _lastPin = value;
     setState(() => _pincodeOk = false);
     if (value.length != 6) {
       _city.clear();

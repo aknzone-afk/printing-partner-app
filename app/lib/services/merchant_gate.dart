@@ -20,31 +20,36 @@ class MerchantGate {
   static Future<bool> verify(BuildContext context, {String? title}) async {
     final controller = TextEditingController();
     bool matches() => controller.text.trim() == _pin;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title ?? 'Enter merchant PIN'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          obscureText: true,
-          maxLength: 8,
-          decoration: const InputDecoration(hintText: 'PIN', counterText: ''),
-          onSubmitted: (_) => Navigator.pop(ctx, matches()),
+    try {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title ?? 'Enter merchant PIN'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            obscureText: true,
+            maxLength: 8,
+            decoration:
+                const InputDecoration(hintText: 'PIN', counterText: ''),
+            onSubmitted: (_) => Navigator.pop(ctx, matches()),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, matches()),
+              child: const Text('Unlock'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, matches()),
-            child: const Text('Unlock'),
-          ),
-        ],
-      ),
-    );
-    return ok == true;
+      );
+      return ok == true;
+    } finally {
+      controller.dispose();
+    }
   }
 }

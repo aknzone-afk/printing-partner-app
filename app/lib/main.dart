@@ -55,7 +55,7 @@ Future<void> main() async {
     // route to My Orders on a tap. Best-effort — never blocks launch (Android
     // works once a sender exists; iOS also needs the APNs key + capability).
     await PushService.instance
-        .init(onOpenOrder: () => _router.go('/home'));
+        .init(onOpenOrder: () => _router.go('/home?tab=orders'));
   } catch (e, st) {
     debugPrint('[main] Firebase init / sign-in failed: $e\n$st');
   }

@@ -411,6 +411,15 @@ class _CropScreenState extends State<CropScreen> {
                                   _ctrlFor(item.id),
                               minScale: 0.5,
                               maxScale: 6,
+                              // The moment the customer pans/zooms by hand, it's
+                              // no longer a clean Fit/Fill — clear the pill so
+                              // the Fit/Fill highlight (and Save's white-pad
+                              // detection) reflect reality.
+                              onInteractionStart: (_) {
+                                if (_fitFill[item.id] != null) {
+                                  setState(() => _fitFill[item.id] = null);
+                                }
+                              },
                               // Room to pan the photo once it's zoomed out
                               // below 1× (and to pinch back below 1×) instead
                               // of it locking in place.

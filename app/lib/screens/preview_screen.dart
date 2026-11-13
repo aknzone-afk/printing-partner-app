@@ -89,7 +89,13 @@ class _PreviewScreenState extends State<PreviewScreen> {
     final id = cart.items[i].id;
     final crop = cart.cropFor(id);
     if (crop == null) return true; // not reviewed yet
-    if (!crop.skipped) return false; // manually framed → fills, no white
+    // A cropped edit still at the contain-fit view (scale ~1, no pan — e.g. the
+    // customer tapped "Fit whole photo" / Reset) prints exactly like a white-pad,
+    // so it must still warn. Only a genuine zoom/pan fills the frame.
+    final atContainFit = (crop.scale - 1).abs() < 0.02 &&
+        crop.offsetX.abs() < 0.5 &&
+        crop.offsetY.abs() < 0.5;
+    if (!crop.skipped && !atContainFit) return false; // framed → fills, no white
     final target = cart.selectedPack?.size.imageAspectWxH;
     final a = _srcAspect[id];
     if (target == null || a == null) return false;

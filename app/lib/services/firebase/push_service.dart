@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 
@@ -50,6 +51,11 @@ class PushService {
       );
       await _saveToken();
       _fm.onTokenRefresh.listen((t) => _saveToken(token: t));
+      // If the first sign-in hadn't completed (offline launch), _saveToken
+      // above had no uid. Re-save once the anonymous uid actually arrives.
+      FirebaseAuth.instance.authStateChanges().listen((user) {
+        if (user != null) _saveToken();
+      });
       FirebaseMessaging.onMessageOpenedApp
           .listen((_) => _onOpenOrder?.call());
       final initial = await _fm.getInitialMessage();

@@ -846,7 +846,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
       await shareNamedFiles(
         ['PrintingPartner-UPI-QR.png'],
-        [data.buffer.asUint8List()],
+        [data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes)],
         subject: 'Scan to pay ${UpiQr.merchantName}',
       );
     } catch (e) {

@@ -182,7 +182,12 @@ class _PhotoGridState extends State<_PhotoGrid> {
   bool _warnWhite(Cart cart, String id) {
     final crop = cart.cropFor(id);
     if (crop == null) return true; // not reviewed yet
-    if (!crop.skipped) return false; // manually framed → fills
+    // A cropped edit still at the contain-fit view (scale ~1, no pan — "Fit
+    // whole photo" / Reset) prints like a white-pad, so still warn.
+    final atContainFit = (crop.scale - 1).abs() < 0.02 &&
+        crop.offsetX.abs() < 0.5 &&
+        crop.offsetY.abs() < 0.5;
+    if (!crop.skipped && !atContainFit) return false; // framed → fills
     final target = cart.selectedPack?.size.imageAspectWxH;
     final a = _srcAspect[id];
     if (target == null || a == null) return false;
@@ -582,22 +587,18 @@ class _CartSummary extends StatelessWidget {
           children: [
             const SizedBox(height: 8),
             PrimaryButton(
+              // Photos upload as individual cropped JPEGs at checkout — there is
+              // no separate "upload" step, so go straight to the address page.
               label: canCheckout
-                  ? (cart.pdfReady
-                      ? 'Continue to address →'
-                      : 'Upload  ↑')
+                  ? 'Continue to address →'
                   : !hasPhotos
                       ? 'Add photos'
                       : !allReviewed
                           ? 'Review crops'
                           : 'Select a product',
-              icon: canCheckout && !cart.pdfReady
-                  ? Icons.cloud_upload_outlined
-                  : null,
+              icon: null,
               onPressed: canCheckout
-                  ? (cart.pdfReady
-                      ? () => context.push('/address')
-                      : () => context.push('/upload'))
+                  ? () => context.push('/address')
                   : !hasPhotos
                       ? () => context.push('/photos')
                       : !allReviewed
