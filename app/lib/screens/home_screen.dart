@@ -8,6 +8,7 @@ import '../models/order_record.dart';
 import '../models/orders_store.dart';
 import '../services/pending_upload.dart';
 import '../services/sheet_pdf.dart';
+import '../services/merchant_gate.dart';
 import '../services/shop_contact.dart';
 import '../theme.dart';
 import '../utils/sample_images.dart';
@@ -69,11 +70,15 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        // TODO(phase2): replace with proper 5-tap + PIN unlock for merchant.
-        // For now: long-press the title to open the merchant dashboard so we
-        // can demo the full flow on a physical device that has no URL bar.
+        // Long-press the title to open the merchant dashboard (no URL bar on a
+        // phone) — but only behind a PIN, so a customer can't reach the shop's
+        // order list by accident.
         title: GestureDetector(
-          onLongPress: () => context.push('/merchant'),
+          onLongPress: () async {
+            if (await MerchantGate.verify(context)) {
+              if (context.mounted) context.push('/merchant');
+            }
+          },
           child: _tabIndex == 0
               ? const PPLogoLockup(height: 30)
               : Text(_titles[_tabIndex]),

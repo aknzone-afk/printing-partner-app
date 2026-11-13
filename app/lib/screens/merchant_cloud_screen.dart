@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/firebase/merchant_sync_service.dart';
+import '../services/merchant_gate.dart';
 import '../services/onedrive/onedrive_auth.dart';
 import '../theme.dart';
 import '../widgets/primary_button.dart';
@@ -143,6 +144,12 @@ class _MerchantCloudScreenState extends State<MerchantCloudScreen> {
                         if (_connected)
                           TextButton(
                             onPressed: () async {
+                              // Unlinking the shop's storage is destructive —
+                              // require the PIN before it can happen.
+                              if (!await MerchantGate.verify(context,
+                                  title: 'PIN to disconnect OneDrive')) {
+                                return;
+                              }
                               await OneDriveAuth.instance.disconnect();
                               await _refreshConnection();
                             },
