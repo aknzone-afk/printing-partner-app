@@ -18,6 +18,7 @@ import '../services/firebase/order_repository.dart';
 import '../services/payment_verifier.dart';
 import '../services/pending_upload.dart';
 import '../services/photo_export.dart';
+import '../services/share_files.dart';
 import '../services/shop_contact.dart';
 import '../services/upi_apps.dart';
 import '../services/upi_qr.dart';
@@ -800,6 +801,43 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  // On a single phone you cannot scan a QR on your own screen. This renders the
+  // UPI QR to a PNG and opens the share sheet, where "Save Image" / "Save to
+  // Photos" puts it in the gallery — then open GPay/PhonePe → scan from gallery.
+  bool _savingQr = false;
+  Future<void> _saveQr(double rupees) async {
+    if (_savingQr) return;
+    setState(() => _savingQr = true);
+    try {
+      final painter = QrPainter(
+        data: UpiQr.withAmount(rupees),
+        version: QrVersions.auto,
+        gapless: true,
+        // High contrast so UPI apps read it straight from the saved image.
+        eyeStyle: const QrEyeStyle(
+            eyeShape: QrEyeShape.square, color: Color(0xFF000000)),
+        dataModuleStyle: const QrDataModuleStyle(
+            dataModuleShape: QrDataModuleShape.square,
+            color: Color(0xFF000000)),
+      );
+      final data = await painter.toImageData(900);
+      if (!mounted) return;
+      if (data == null) {
+        _showSnack('Could not make the QR image — scan it on screen instead');
+        return;
+      }
+      await shareNamedFiles(
+        ['PrintingPartner-UPI-QR.png'],
+        [data.buffer.asUint8List()],
+        subject: 'Scan to pay ${UpiQr.merchantName}',
+      );
+    } catch (e) {
+      if (mounted) _showSnack('Could not save the QR: $e');
+    } finally {
+      if (mounted) setState(() => _savingQr = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final cart = context.watch<Cart>();
@@ -992,6 +1030,28 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         upiId: UpiQr.merchantUpiId,
                         onCopied: () => _showSnack('UPI id copied'),
                       ),
+                      if (paise != null) ...[
+                        const SizedBox(height: 6),
+                        TextButton.icon(
+                          onPressed:
+                              _savingQr ? null : () => _saveQr(paise / 100.0),
+                          icon: _savingQr
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child:
+                                      CircularProgressIndicator(strokeWidth: 2))
+                              : const Icon(Icons.download_rounded, size: 18),
+                          label: const Text('Save QR / open in GPay'),
+                        ),
+                        const Text(
+                          'One phone? Save the QR, then in GPay/PhonePe tap '
+                          'Scan → pick it from your gallery.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 11, color: AppColors.textSecondary),
+                        ),
+                      ],
                     ],
                   ),
                 ),

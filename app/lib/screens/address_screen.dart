@@ -35,6 +35,17 @@ class _AddressScreenState extends State<AddressScreen> {
   @override
   void initState() {
     super.initState();
+    // Pre-fill from the saved cart so backing in to fix one line never wipes
+    // what the customer already typed (the cart persists every field).
+    final cart = context.read<Cart>();
+    _name.text = cart.customerName;
+    _phone.text = cart.customerPhone;
+    _line1.text = cart.addressLine1;
+    _line2.text = cart.addressLine2;
+    _city.text = cart.city;
+    _state.text = cart.state;
+    _pincode.text = cart.pincode;
+    if (cart.pincode.length == 6) _pincodeOk = true;
     _pincode.addListener(_onPincodeChanged);
   }
 
@@ -145,7 +156,7 @@ class _AddressScreenState extends State<AddressScreen> {
               ),
               _Field(
                 controller: _phone,
-                label: 'Mobile number',
+                label: 'WhatsApp / Mobile number',
                 keyboardType: TextInputType.phone,
                 inputFormatters: [
                   FilteringTextInputFormatter.digitsOnly,

@@ -43,6 +43,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
   // Tiles currently re-rendering after an edit — each shows a centered spinner
   // over its old image until the new crop (zoom-in) finishes rendering.
   final Set<int> _busy = <int>{};
+  // id -> oriented source aspect (w/h), probed lazily. A skipped (white-pad)
+  // crop only prints white when the photo's aspect differs from the print's,
+  // so a photo that already matches the shape must NOT show the red warning.
+  final Map<String, double> _srcAspect = <String, double>{};
   // Guards against a stale render (cart changed while rendering) overwriting a
   // fresh one, and against setState after dispose.
   String _sig = '';
@@ -50,7 +54,46 @@ class _PreviewScreenState extends State<PreviewScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _render());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _render();
+      _probeAspects(context.read<Cart>());
+    });
+  }
+
+  /// Measure each photo's real (EXIF-oriented) aspect once, so the "prints with
+  /// white" warning can be suppressed for photos that already fill the print
+  /// shape. Cheap (decodes a 96px probe); failures just leave the id unprobed.
+  Future<void> _probeAspects(Cart cart) async {
+    final pending = [
+      for (final it in cart.items)
+        if (!_srcAspect.containsKey(it.id)) it,
+    ];
+    if (pending.isEmpty) return;
+    await Future.wait(pending.map((it) async {
+      try {
+        final s = await resolveImageSize(it.localPath);
+        if (s.width > 0 && s.height > 0) {
+          _srcAspect[it.id] = s.width / s.height;
+        }
+      } catch (_) {}
+    }));
+    if (mounted) setState(() {});
+  }
+
+  /// Whether tile [i] will actually print with white edges — true only when the
+  /// photo is on an auto white-pad crop AND its shape differs from the print's.
+  /// Unknown-aspect (not probed yet) returns false so no red ever flashes on a
+  /// photo that in fact fills the frame; the probe repaints it if it doesn't.
+  bool _warnWhite(Cart cart, int i) {
+    if (i < 0 || i >= cart.items.length) return false;
+    final id = cart.items[i].id;
+    final crop = cart.cropFor(id);
+    if (crop == null) return true; // not reviewed yet
+    if (!crop.skipped) return false; // manually framed → fills, no white
+    final target = cart.selectedPack?.size.imageAspectWxH;
+    final a = _srcAspect[id];
+    if (target == null || a == null) return false;
+    return (a - target).abs() > target * 0.01; // white only if aspect differs
   }
 
   // Only the photo SET (ids + pack), NOT the crops: a single re-crop refreshes
@@ -119,6 +162,7 @@ class _PreviewScreenState extends State<PreviewScreen> {
       );
       if (!mounted || _sig != sig) return;
       setState(() => _previews = List<Uint8List?>.from(jpgs));
+      _probeAspects(cart); // measure any newly added photos
     } catch (e) {
       // Every photo is validated as decodable at pick time, so a render failure
       // here is rare; show a graceful "continue to cart" rather than a blank.
@@ -162,6 +206,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
                 pack: pack,
                 previews: previews,
                 busy: _busy,
+                warns: [
+                  for (var i = 0; i < cart.items.length; i++)
+                    _warnWhite(cart, i),
+                ],
                 onEditPhoto: _editPhoto,
               ),
       ),
@@ -252,12 +300,14 @@ class _ResultGrid extends StatelessWidget {
     required this.pack,
     required this.previews,
     required this.busy,
+    required this.warns,
     required this.onEditPhoto,
   });
   final Cart cart;
   final PrintPack pack;
   final List<Uint8List?> previews;
   final Set<int> busy;
+  final List<bool> warns;
   final void Function(int index) onEditPhoto;
 
   @override
@@ -306,8 +356,7 @@ class _ResultGrid extends StatelessWidget {
                 pack: pack,
                 jpg: previews.length > i ? previews[i] : null,
                 busy: busy.contains(i),
-                warn: i < cart.items.length &&
-                    (cart.cropFor(cart.items[i].id)?.skipped ?? true),
+                warn: i < warns.length && warns[i],
                 onTap: () => onEditPhoto(i),
               ),
               childCount: count,

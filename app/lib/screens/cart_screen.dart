@@ -143,11 +143,50 @@ class _PhotoGridState extends State<_PhotoGrid> {
   // Indices currently re-rendering after an edit — a spinner shows ON that tile
   // (there is no top loading line).
   final Set<int> _busy = <int>{};
+  // id -> oriented source aspect (w/h). A white-pad crop only prints white when
+  // the photo's shape differs from the print's, so a photo that already fills
+  // the frame must NOT show the red warning. Probed lazily.
+  final Map<String, double> _srcAspect = <String, double>{};
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _render());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _render();
+      _probeAspects(widget.cart);
+    });
+  }
+
+  /// Measure each photo's EXIF-oriented aspect once, so the "prints with white"
+  /// warning is suppressed for photos that already fill the print shape.
+  Future<void> _probeAspects(Cart cart) async {
+    final pending = [
+      for (final it in cart.items)
+        if (!_srcAspect.containsKey(it.id)) it,
+    ];
+    if (pending.isEmpty) return;
+    await Future.wait(pending.map((it) async {
+      try {
+        final s = await resolveImageSize(it.localPath);
+        if (s.width > 0 && s.height > 0) {
+          _srcAspect[it.id] = s.width / s.height;
+        }
+      } catch (_) {}
+    }));
+    if (mounted) setState(() {});
+  }
+
+  /// True only when this photo will actually print with white edges — on an
+  /// auto white-pad crop AND its shape differs from the print's. Unknown aspect
+  /// returns false so no red flashes on a photo that in fact fills the frame.
+  bool _warnWhite(Cart cart, String id) {
+    final crop = cart.cropFor(id);
+    if (crop == null) return true; // not reviewed yet
+    if (!crop.skipped) return false; // manually framed → fills
+    final target = cart.selectedPack?.size.imageAspectWxH;
+    final a = _srcAspect[id];
+    if (target == null || a == null) return false;
+    return (a - target).abs() > target * 0.01;
   }
 
   String _signatureOf(Cart cart) {
@@ -174,6 +213,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
       );
       if (!mounted || _sig != sig) return;
       setState(() => _previews = List<Uint8List?>.from(jpgs));
+      _probeAspects(cart); // measure any newly added photos
     } catch (_) {
       // Leave placeholders; tiles stay editable and the order still validates
       // every photo at upload.
@@ -324,7 +364,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
               position: position,
               tilt: tilt,
               busy: _busy.contains(index),
-              warn: cart.cropFor(item.id)?.skipped ?? true,
+              warn: _warnWhite(cart, item.id),
               onEdit: () => _editTile(index),
               onRemove: () => cart.remove(item.id),
             );
