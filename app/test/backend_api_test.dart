@@ -246,16 +246,28 @@ void main() {
       }
     });
 
-    test('network error = not verified, asks to check the internet', () async {
+    test('network error = not verified; only a true offline error blames the '
+        'internet', () async {
+      // A genuine offline device (DNS / host lookup fails) -> it IS fair to
+      // point at the connection.
+      final offline = await verifyWith((_) =>
+          throw const SocketException('Failed host lookup: 130-210-24-18.nip.io'));
+      expect(offline.verified, isFalse);
+      expect(offline.token, isNull);
+      expect(offline.reason.toLowerCase(), contains('internet'));
+      expect(offline.reason, isNot(contains('Exception')));
+
+      // Server-side failures (connection closed mid-reply, bad TLS) are OUR
+      // server, not the customer's internet -> never blame their connection.
       for (final Object error in [
-        const SocketException('Failed host lookup: 130-210-24-18.nip.io'),
         http.ClientException('Connection closed before full header'),
         const HandshakeException('bad certificate'),
       ]) {
         final c = await verifyWith((_) => throw error);
         expect(c.verified, isFalse, reason: '$error');
         expect(c.token, isNull);
-        expect(c.reason.toLowerCase(), contains('internet'));
+        expect(c.reason.toLowerCase(), isNot(contains('internet')),
+            reason: 'a server-side failure must not blame the customer internet');
         expect(c.reason, isNot(contains('Exception')),
             reason: 'no raw exception text for the customer');
       }
@@ -272,7 +284,9 @@ void main() {
       expect(out, isNotNull, reason: 'must give up after 30 s');
       expect(out!.verified, isFalse);
       expect(out!.token, isNull);
-      expect(out!.reason.toLowerCase(), contains('internet'));
+      // A timeout is OUR server being slow, not the customer's internet.
+      expect(out!.reason.toLowerCase(), isNot(contains('internet')));
+      expect(out!.reason.toLowerCase(), contains('again'));
     });
 
     test('amount sent as a string is still read', () async {
@@ -391,8 +405,8 @@ void main() {
           (_) => json(413, {'ok': false, 'error': 'photo too large'}));
       final proxyTooLarge =
           await ingestWith((_) => html(413, 'Request Entity Too Large'));
-      final offline =
-          await ingestWith((_) => throw const SocketException('offline'));
+      final offline = await ingestWith(
+          (_) => throw const SocketException('Failed host lookup: host'));
 
       // The exact values checkout_screen.dart branches on.
       expect((tokenExpired.status, tokenExpired.error), (402, 'token_expired'));
@@ -490,7 +504,9 @@ void main() {
       expect(out!.ok, isFalse);
       expect(out!.status, 0);
       expect(out!.duplicate, isFalse);
-      expect(out!.error!.toLowerCase(), contains('internet'));
+      // A timeout is not the customer's internet — honest, retryable wording.
+      expect(out!.error!.toLowerCase(), isNot(contains('internet')));
+      expect(out!.error!.toLowerCase(), contains('again'));
     });
   });
 
