@@ -27,7 +27,7 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
   bool _autoOpened = false;
 
   int get _target => context.read<Cart>().targetSnapCount;
-  int get _picked => context.read<Cart>().itemCount;
+  int get _picked => context.read<Cart>().totalPrints;
   int get _remaining => (_target - _picked).clamp(0, _target);
 
   @override
@@ -134,7 +134,7 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
         if (failed > 0 || bad > 0) _showSkippedMessage(failed, bad);
 
         if (_target > 0 &&
-            cart.itemCount >= _target &&
+            cart.totalPrints >= _target &&
             good.isNotEmpty &&
             mounted) {
           // push (not go): Android system Back on the auto-opened crop screen
@@ -217,7 +217,7 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
     final cart = context.watch<Cart>();
     final pack = cart.selectedPack;
     final target = pack?.snapCount ?? 0;
-    final picked = cart.itemCount;
+    final picked = cart.totalPrints;
     final remaining = (target - picked).clamp(0, target);
     final complete = target > 0 && picked >= target;
 
@@ -325,7 +325,7 @@ class _PackHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final pack = cart.selectedPack!;
-    final picked = cart.itemCount;
+    final picked = cart.totalPrints;
     final target = pack.snapCount;
     final progress = target == 0 ? 0.0 : (picked / target).clamp(0.0, 1.0);
     final complete = picked >= target;
