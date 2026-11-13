@@ -1049,73 +1049,48 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         upiId: UpiQr.merchantUpiId,
                         onCopied: () => _showSnack('UPI id copied'),
                       ),
-                      if (paise != null) ...[
-                        const SizedBox(height: 12),
-                        // The most RELIABLE way on one phone: save the QR and
-                        // scan it from the gallery inside the UPI app. Some apps
-                        // (esp. PhonePe) refuse a direct app-to-app link to a
-                        // personal UPI id, but always accept a scanned QR.
-                        SizedBox(
-                          width: double.infinity,
-                          child: OutlinedButton.icon(
-                            onPressed: _savingQr
-                                ? null
-                                : () => _saveQr(paise / 100.0),
-                            icon: _savingQr
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2))
-                                : const Icon(Icons.download_rounded, size: 20),
-                            label: const Text('Save QR to pay'),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: AppColors.primary,
-                              side: const BorderSide(color: AppColors.primary),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 14),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.lavender,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Text(
-                            'Easiest on one phone:\n'
-                            '1. Tap "Save QR to pay"\n'
-                            '2. Open GPay / PhonePe / Paytm → Scan\n'
-                            '3. Choose the saved QR from your Gallery → pay',
-                            style: TextStyle(
-                                fontSize: 12,
-                                height: 1.5,
-                                color: AppColors.primary,
-                                fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
                 if (paise != null) ...[
+                  // PRIMARY on one phone: tap your UPI app and pay the pre-filled
+                  // amount. Our payee is a Paytm MERCHANT id, so GPay / PhonePe /
+                  // Paytm accept the payment directly.
                   const SizedBox(height: 20),
-                  const Text(
-                    'Or open an app directly (if it shows an error or a limit, '
-                    'use "Save QR to pay" above instead):',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                        fontSize: 11, color: AppColors.textSecondary),
-                  ),
-                  const SizedBox(height: 8),
+                  const Text('Pay from this phone — one tap',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 10),
                   _PayWithApps(
                     rupees: paise / 100.0,
                     onNotInstalled: (name) => _showSnack(
-                        '$name not found on this phone — use "Save QR to pay" above'),
+                        '$name not found on this phone — try another app or "Save QR"'),
                     onFailed: () => _showSnack(
-                        'Couldn\'t open the app — use "Save QR to pay" above instead'),
+                        "Couldn't open the app — try another, or use \"Save QR\" below"),
+                  ),
+                  const SizedBox(height: 14),
+                  // FALLBACK: if an app isn't installed or errors, save the QR
+                  // and scan it from the gallery inside any UPI app.
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed:
+                          _savingQr ? null : () => _saveQr(paise / 100.0),
+                      icon: _savingQr
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.download_rounded, size: 20),
+                      label: const Text('Save QR to pay (if an app fails)'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(color: AppColors.primary),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
                   ),
                 ],
                 const SizedBox(height: 24),
@@ -1282,9 +1257,9 @@ class _Steps extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         row('1',
-            'Pay $amountLabel. From another phone, scan the QR above with GPay '
-            '/ PhonePe / Paytm. On this phone, screenshot the QR and open it in '
-            'your UPI app, or tap Copy and pay the UPI id above.'),
+            'Pay $amountLabel — tap GPay / PhonePe / Paytm above to pay from '
+            'this phone, or scan the QR from another phone. (If an app fails, '
+            'use "Save QR to pay" and scan it from your gallery.)'),
         row('2', 'Take a screenshot of the "payment successful" screen.'),
         row('3',
             'Tap below and attach that screenshot — we confirm it instantly.'),
