@@ -161,11 +161,13 @@ class Cart extends ChangeNotifier {
     });
   }
 
-  /// True when every photo has been reviewed (either cropped or explicitly
-  /// accepted with auto white padding).
+  /// True when there is at least one photo and every photo has been reviewed
+  /// (cropped or explicitly accepted with auto white padding). The pack need
+  /// NOT be full — the customer pays the pack price and prints however many
+  /// they added (the server accepts any count up to [snapCount]); "Add N more"
+  /// reminds them how many more fit.
   bool get allPhotosReady {
-    if (_selectedPack == null) return false;
-    if (_items.length < _selectedPack!.snapCount) return false;
+    if (_selectedPack == null || _items.isEmpty) return false;
     return _items.every((p) => _edits.containsKey(p.id));
   }
 

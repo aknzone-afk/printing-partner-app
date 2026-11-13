@@ -87,34 +87,39 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
       );
       if (!mounted) return;
       if (result != null && result.isNotEmpty) {
-        // Convert AssetEntity -> local file path. Resolve each asset on its
-        // own so one that can't load (e.g. still in iCloud, no network) can't
-        // throw away the rest of the selection.
-        final paths = <String>[];
-        var failed = 0;
-        for (final asset in result) {
-          try {
-            final file = await asset.originFile;
-            if (file != null) {
-              paths.add(file.path);
-            } else {
-              failed++;
-            }
-          } catch (_) {
-            failed++;
-          }
-        }
-        if (!mounted) return;
-
-        // Validate each file BEFORE the customer ever pays: a corrupt /
-        // undecodable photo rejected here (not after payment at render time).
+        // Resolve each AssetEntity to a file AND validate it's decodable, all
+        // BEFORE the customer ever pays (a corrupt / still-in-iCloud photo is
+        // caught here, not after payment). Done concurrently in small batches
+        // of 4 so a 50-photo pick doesn't crawl one slow fetch at a time, while
+        // still bounding IO. One bad asset never drops the rest of the pick.
         final good = <String>[];
-        var bad = 0;
-        for (final p in paths) {
-          if (await canDecodeImage(p)) {
-            good.add(p);
-          } else {
-            bad++;
+        var failed = 0; // file couldn't load (e.g. still in iCloud)
+        var bad = 0; // loaded but not a decodable image
+        const batchSize = 4;
+        for (var start = 0; start < result.length; start += batchSize) {
+          final end = (start + batchSize) < result.length
+              ? start + batchSize
+              : result.length;
+          final outcomes = await Future.wait(
+            result.sublist(start, end).map((asset) async {
+              try {
+                final file = await asset.originFile;
+                if (file == null) return (path: null as String?, kind: 'failed');
+                final ok = await canDecodeImage(file.path);
+                return (path: ok ? file.path : null, kind: ok ? 'good' : 'bad');
+              } catch (_) {
+                return (path: null as String?, kind: 'failed');
+              }
+            }),
+          );
+          for (final o in outcomes) {
+            if (o.kind == 'good') {
+              good.add(o.path!);
+            } else if (o.kind == 'failed') {
+              failed++;
+            } else {
+              bad++;
+            }
           }
         }
         if (!mounted) return;
@@ -265,16 +270,17 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
                           const SizedBox(height: 12),
                         ],
                         if (target > 0)
+                          // Preview is reachable as soon as there's one photo —
+                          // the customer can review a partial pack and add the
+                          // rest later (or order it as-is for the pack price).
                           PrimaryButton(
                             label: complete
                                 ? 'See preview  →'
-                                : 'Pick $remaining more to continue',
-                            icon: complete
-                                ? Icons.arrow_forward_rounded
-                                : null,
-                            onPressed: complete
-                                ? () => context.push('/preview')
-                                : null,
+                                : 'Preview $picked of $target  →',
+                            icon: Icons.arrow_forward_rounded,
+                            onPressed: cart.isEmpty
+                                ? null
+                                : () => context.push('/preview'),
                           )
                         else if (!cart.isEmpty)
                           PrimaryButton(
