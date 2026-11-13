@@ -34,6 +34,12 @@ class _CropScreenState extends State<CropScreen> {
   // Per-photo orientation probe, cached so bulk actions can AWAIT it (every
   // photo's auto-rotation must be known before a crop is written for it).
   final Map<String, Future<void>> _orientFutures = {};
+  // Oriented source size per photo, cached from the probe — the Fill toggle
+  // needs it to compute the cover-zoom factor.
+  final Map<String, Size> _sizes = {};
+  // Which mode the customer last tapped on the Fit/Fill toggle: 0 = Fit (whole
+  // photo, white edges), 1 = Fill (crop edges). Null = they then hand-adjusted.
+  final Map<String, int?> _fitFill = {};
   final GlobalKey _viewerKey = GlobalKey();
 
   /// True when this screen was opened to edit ONE photo from the cart
@@ -220,7 +226,64 @@ class _CropScreenState extends State<CropScreen> {
       _rotations[id] = (_rotFor(id) + 1) % 4;
       // Reset zoom/pan when rotation changes so the auto-fit takes hold.
       _ctrlFor(id).value = Matrix4.identity();
+      _fitFill[id] = 0; // back to whole-photo fit
     });
+  }
+
+  /// "Fit": show the WHOLE photo (white edges where it doesn't fill) — just the
+  /// identity viewer matrix on the BoxFit.contain child.
+  void _applyFit(String id) {
+    setState(() {
+      _ctrlFor(id).value = Matrix4.identity();
+      _fitFill[id] = 0;
+    });
+  }
+
+  /// "Fill": zoom the photo so it covers the whole print (crops the long edges),
+  /// centred — the customer then just drags to position. Needs the photo's
+  /// oriented aspect to know how much to scale up from the contain fit.
+  Future<void> _applyFill(PhotoItem item, double frameAspect) async {
+    final id = item.id;
+    var size = _sizes[id];
+    if (size == null) {
+      try {
+        size = await resolveImageSize(item.localPath);
+        _sizes[id] = size;
+      } catch (_) {
+        return;
+      }
+    }
+    if (!mounted) return;
+    // Account for 90°/270° rotation swapping the photo's width/height.
+    var photoAspect = size.width / size.height;
+    if (_rotFor(id) % 2 == 1) photoAspect = 1 / photoAspect;
+    // cover / contain scale ratio (always >= 1).
+    final factor = photoAspect > frameAspect
+        ? photoAspect / frameAspect
+        : frameAspect / photoAspect;
+    final ctrl = _ctrlFor(id);
+    ctrl.value = Matrix4.identity();
+    _scaleAroundCenter(ctrl, factor);
+    setState(() => _fitFill[id] = 1);
+  }
+
+  /// Scale the viewer by [factor] around the viewport centre (so the photo
+  /// grows from the middle, not the top-left corner).
+  void _scaleAroundCenter(TransformationController ctrl, double factor) {
+    final cur = ctrl.value.clone();
+    final box = _viewerKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) {
+      cur.scale(factor, factor);
+      ctrl.value = cur;
+      return;
+    }
+    final size = box.size;
+    final center = Vector3(size.width / 2, size.height / 2, 0);
+    final scene = Matrix4.inverted(cur).transform3(center);
+    cur.translate(scene.x, scene.y);
+    cur.scale(factor, factor);
+    cur.translate(-scene.x, -scene.y);
+    ctrl.value = cur;
   }
 
   /// Best-fit rotation calculator: 0° or 90° depending on which gives more
@@ -255,6 +318,7 @@ class _CropScreenState extends State<CropScreen> {
   Future<void> _probeAndOrient(PhotoItem item, double frameAspect) async {
     try {
       final size = await resolveImageSize(item.localPath);
+      _sizes[item.id] = size;
       if (!mounted) return;
       final best = _bestRotation(size, frameAspect);
       if (best != 0 && _rotFor(item.id) == 0) {
@@ -405,33 +469,130 @@ class _CropScreenState extends State<CropScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              // Just Save: the customer zooms / drags / rotates with the controls
-              // on the right, then saves THIS photo and goes straight back to the
-              // preview. (No "Auto fit" here — every photo already arrives
-              // auto-fit on the preview.)
-              child: SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _save,
-                  icon: const Icon(Icons.check_rounded, size: 20),
-                  label: const Text('Save crop',
-                      style:
-                          TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    minimumSize: const Size(0, 54),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // One-tap framing: "Fit whole photo" shows everything with
+                  // white edges; "Fill print" zooms to crop the edges, centred,
+                  // and the customer just drags to position. They can still
+                  // pinch / drag freely afterwards.
+                  _FitFillToggle(
+                    mode: _fitFill[item.id],
+                    onFit: () => _applyFit(item.id),
+                    onFill: () => _applyFill(item, aspect),
                   ),
-                ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _save,
+                      icon: const Icon(Icons.check_rounded, size: 20),
+                      label: const Text('Save crop',
+                          style: TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w700)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        minimumSize: const Size(0, 54),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
         ),
       ),
+      ),
+    );
+  }
+}
+
+/// A two-segment pill: "Fit whole photo" (white edges) | "Fill print" (crop
+/// edges). The active segment is highlighted; tapping either applies that
+/// framing instantly.
+class _FitFillToggle extends StatelessWidget {
+  const _FitFillToggle({
+    required this.mode,
+    required this.onFit,
+    required this.onFill,
+  });
+
+  /// 0 = Fit selected, 1 = Fill selected, null = neither (hand-adjusted).
+  final int? mode;
+  final VoidCallback onFit;
+  final VoidCallback onFill;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.lavender,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.primary.withValues(alpha: 0.25)),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        children: [
+          _seg(
+            label: 'Fit whole photo',
+            icon: Icons.fit_screen_rounded,
+            selected: mode == 0,
+            onTap: onFit,
+          ),
+          _seg(
+            label: 'Fill print',
+            icon: Icons.crop_free_rounded,
+            selected: mode == 1,
+            onTap: onFill,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _seg({
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: Material(
+        color: selected ? AppColors.primary : Colors.transparent,
+        borderRadius: BorderRadius.circular(9),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(9),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 9),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon,
+                    size: 16,
+                    color: selected ? Colors.white : AppColors.primary),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: selected ? Colors.white : AppColors.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
