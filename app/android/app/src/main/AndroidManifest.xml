@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Android 13+ runtime permission for order-status push notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -10,6 +12,10 @@
         android:label="Printing Partner"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- Default FCM notification channel for order-status pushes. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="order_updates" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
