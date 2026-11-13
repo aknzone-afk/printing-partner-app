@@ -405,47 +405,45 @@ class _PrintCard extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Red "crop me" warning ABOVE the print (never over the photo) when
+            // it will print with white edges (doesn't fill the shape yet).
+            if (warn && jpg != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6, left: 2, right: 2),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: AppColors.error,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.warning_amber_rounded,
+                          size: 13, color: Colors.white),
+                      SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          'Crop to fill — or it prints with white',
+                          maxLines: 2,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              height: 1.1),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             Flexible(
               child: Stack(
                 children: [
                   _print(),
-                  // Red "crop me" banner when this photo will print with white
-                  // edges (it doesn't fill the print shape, not yet cropped).
-                  if (warn && jpg != null)
-                    Positioned(
-                      left: 4,
-                      right: 4,
-                      top: 4,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.error,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.warning_amber_rounded,
-                                size: 13, color: Colors.white),
-                            SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                'Crop to fill — or it prints with white',
-                                maxLines: 2,
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w700,
-                                    height: 1.1),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
                   Positioned(
                     top: 6,
                     left: 6,
