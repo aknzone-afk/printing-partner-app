@@ -43,6 +43,9 @@ Future<void> main() async {
     await FirebaseAppCheck.instance.activate(
       appleProvider:
           kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
+      // Android was unconfigured — debug token in dev, Play Integrity in release.
+      androidProvider:
+          kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
     );
     // No OTP — a silent anonymous sign-in gives the customer a uid for the
     // Firestore order (real identity = the mobile typed at checkout).

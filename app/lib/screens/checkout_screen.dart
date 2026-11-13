@@ -297,14 +297,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_busy) return; // re-entrancy guard (double-tap / fast re-tap)
     if (_rejected) return; // backend refused the payment: nothing to retry
 
-    // TEST name -> no payment, place the order straight through.
-    if (_placedOrderId == null && _isTestOrder) {
-      await _placeTestOrder();
-      return;
-    }
-
-    // Test name ("TEST"/"TESTY") -> never show or charge payment; place the
-    // order straight through so the owner can see how it arrives.
+    // Test name ("TEST"/"TESTY", debug builds only) -> never show or charge
+    // payment; place the order straight through so the owner can see how it
+    // arrives.
     if (_placedOrderId == null && _isTestOrder) {
       await _placeTestOrder();
       return;

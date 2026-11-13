@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 import '../models/cart.dart';
+import '../models/photo_item.dart';
 import '../services/photo_export.dart';
 import '../theme.dart';
 import '../widgets/photo_thumb.dart';
@@ -47,6 +48,7 @@ class _PhotoPickerScreenState extends State<PhotoPickerScreen> {
   }
 
   Future<void> _pickFromGallery() async {
+    if (_picking) return; // a picker is already open — ignore a double-tap
     final wasAutoOpen = _autoOpened && context.read<Cart>().isEmpty;
     // Opened from the cart's "Add N more": once the gallery closes (photos
     // added OR cancelled), pop straight back to the cart — never render this
@@ -463,7 +465,7 @@ class _PreviewGrid extends StatelessWidget {
     required this.aspectWxH,
     required this.onRemove,
   });
-  final List items;
+  final List<PhotoItem> items;
   final double aspectWxH;
   final void Function(String id) onRemove;
 

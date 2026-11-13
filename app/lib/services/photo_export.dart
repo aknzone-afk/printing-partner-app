@@ -154,7 +154,10 @@ Future<Uint8List?> renderOneCroppedJpeg(
   final longSide = maxLongSide ?? printLongSideFor(pack.size);
   final outputCap = maxLongSide ?? 4000;
   final edit = cart.cropFor(items[index].id) ?? const CropEdit.skipped();
-  final rootToken = kIsWeb ? null : RootIsolateToken.instance;
+  // Match renderCroppedJpegs: no root token under flutter_test either, or the
+  // single-tile render crashes in widget tests.
+  final rootToken =
+      (kIsWeb || isFlutterTest) ? null : RootIsolateToken.instance;
   try {
     return await _renderItem(
       items[index].localPath,
