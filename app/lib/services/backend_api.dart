@@ -25,8 +25,6 @@ class BackendApi {
     defaultValue: '278fe826b3c836ad2310568a8bd16db7',
   );
 
-  static const String _netError =
-      "Couldn't verify right now. Check your internet and try again.";
   static const String _chatFallback =
       "Sorry, I couldn't reach the assistant right now. Please try again in a "
       'moment, or the shop team will help you.';
@@ -83,12 +81,33 @@ class BackendApi {
       debugPrint('[BackendApi] verifyPayment failed: $e');
       return <String, dynamic>{
         'verified': false,
-        'reason': _netError,
+        'reason': reachFailureReason(e),
         'httpStatus': 0,
       };
     } finally {
       client?.close();
     }
+  }
+
+  /// An HONEST message for a request that threw before we got an answer. We only
+  /// blame the customer's internet when the signal is clearly an offline device
+  /// (DNS / unreachable network). A timeout or a server-side connection problem
+  /// is OUR server being slow/unreachable — never the customer's connection.
+  static String reachFailureReason(Object e) {
+    if (e is TimeoutException) {
+      return 'This is taking longer than usual right now. '
+          'Please wait a moment and tap again.';
+    }
+    final s = e.toString();
+    final offline = s.contains('Failed host lookup') ||
+        s.contains('No address associated with hostname') ||
+        s.contains('Network is unreachable') ||
+        s.contains('Network is down');
+    if (offline) {
+      return 'You appear to be offline. Check your internet and try again.';
+    }
+    return "Couldn't reach our server just now — it didn't respond in time. "
+        'Please try again in a moment.';
   }
 
   /// POST /chat (JSON). Never throws. `ok` is true only for a real assistant
@@ -246,8 +265,7 @@ class BackendApi {
       return (
         ok: false,
         status: 0,
-        error: "Couldn't upload the order right now. Check your internet "
-            'and try again.',
+        error: reachFailureReason(e),
         duplicate: false,
         orderNumber: null,
       );

@@ -452,8 +452,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   /// Gated to DEBUG builds only — in a release / store build this always
   /// returns false, so a real customer can never skip payment by naming
   /// themselves "test".
+  // TEST ORDER SWITCH — keep true while the app is invite-only on TestFlight so
+  // the owner can place a free "TEST"/"TESTY" order without paying. Set this to
+  // false (one line) BEFORE the PUBLIC App Store launch, or a real customer
+  // could place a free order by naming themselves "testy".
+  static const bool _allowTestOrder = true;
+
   bool get _isTestOrder {
-    if (!kDebugMode) return false;
+    if (!(kDebugMode || _allowTestOrder)) return false;
     final n = context.read<Cart>().customerName.trim().toLowerCase();
     return n == 'test' || n == 'testy';
   }
@@ -869,7 +875,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final showSetup = _placedOrderId == null && _backendReady != true;
     // Owner test: name is "TEST"/"TESTY" -> hide the payment gateway and place
     // the order directly (fresh order only; a placed order's retry is normal).
-    final testMode = kDebugMode &&
+    final testMode = (kDebugMode || _allowTestOrder) &&
         _placedOrderId == null &&
         (cart.customerName.trim().toLowerCase() == 'test' ||
             cart.customerName.trim().toLowerCase() == 'testy');
@@ -1170,7 +1176,11 @@ class _IngestFailure implements Exception {
     if (status == 413) {
       return 'The photos are too large for the server in one go.';
     }
-    if (status == 0) return 'Check your internet connection.';
+    // status 0 = no answer (timeout / server unreachable / offline). The backend
+    // now hands us an honest reason — show it instead of always blaming the net.
+    if (status == 0) {
+      return error ?? "Couldn't reach the server. Please try again in a moment.";
+    }
     return 'The server replied $status${error == null ? '' : ' ($error)'}.';
   }
 

@@ -52,8 +52,7 @@ class PaymentVerifier {
       final reason = _str(res['reason']) ??
           (verified
               ? 'Payment of ₹${expectedRupees.toStringAsFixed(0)} confirmed.'
-              : "Couldn't verify the payment right now. Check your internet "
-                  'and try again.');
+              : "Couldn't verify the payment just now. Please try again.");
 
       final amount = res['amount'] is num
           ? (res['amount'] as num).toDouble()
@@ -98,10 +97,9 @@ class PaymentVerifier {
       );
     } catch (e) {
       debugPrint('[PaymentVerifier] verify failed: $e');
-      return const PaymentCheck(
+      return PaymentCheck(
         verified: false,
-        reason:
-            "Couldn't verify the payment right now. Check your internet and try again.",
+        reason: BackendApi.reachFailureReason(e),
       );
     }
   }
