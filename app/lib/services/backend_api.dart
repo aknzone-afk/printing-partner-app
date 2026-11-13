@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'remote_config.dart';
+
 /// Thin client for the Printing Partner backend (Flask on the owner's Oracle
 /// VM). Every call is wrapped so it NEVER throws — callers get a safe, already
 /// customer-friendly fallback on network / timeout / parse failure.
@@ -156,6 +158,9 @@ class BackendApi {
         return (ok: false, ai: false, catalog: 0);
       }
       final body = _decodeMap(res.body);
+      // Pick up any live UPI id / shop WhatsApp the backend chose to send, so
+      // the owner can rotate them without a new build (falls back to defaults).
+      RemoteConfig.applyFromHealth(body);
       return (
         ok: body['ok'] == true,
         ai: body['ai'] == true,
