@@ -604,7 +604,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         if (!mounted) return;
         _renderedJpgs = jpgs;
       }
-      final jpgs = _renderedJpgs!;
+      final rendered = _renderedJpgs!;
+      // Expand to one JPEG per PRINT: a photo set to N copies uploads N
+      // identical JPEGs so the shop prints that many. renderCroppedJpegs
+      // returns one JPEG per cart item, in item order. Quantity defaults to 1,
+      // so a normal order is unchanged.
+      final items = cart.items;
+      final jpgs = <Uint8List>[];
+      for (var i = 0; i < rendered.length; i++) {
+        final q = i < items.length ? items[i].quantity : 1;
+        for (var c = 0; c < q; c++) {
+          jpgs.add(rendered[i]);
+        }
+      }
       final mb = jpgs.fold<int>(0, (s, b) => s + b.length) / (1024 * 1024);
       _setStage(
           'Uploading ${jpgs.length} photo${jpgs.length == 1 ? '' : 's'} '

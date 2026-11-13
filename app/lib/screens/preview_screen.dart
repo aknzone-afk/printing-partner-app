@@ -357,6 +357,14 @@ class _ResultGrid extends StatelessWidget {
                 jpg: previews.length > i ? previews[i] : null,
                 busy: busy.contains(i),
                 warn: i < warns.length && warns[i],
+                quantity: i < items.length ? items[i].quantity : 1,
+                canInc: cart.totalPrints < pack.snapCount,
+                onInc: i < items.length
+                    ? () => cart.setQuantity(items[i].id, items[i].quantity + 1)
+                    : null,
+                onDec: i < items.length
+                    ? () => cart.setQuantity(items[i].id, items[i].quantity - 1)
+                    : null,
                 onTap: () => onEditPhoto(i),
               ),
               childCount: count,
@@ -379,6 +387,10 @@ class _PrintCard extends StatelessWidget {
     required this.jpg,
     required this.busy,
     required this.warn,
+    required this.quantity,
+    required this.canInc,
+    required this.onInc,
+    required this.onDec,
     required this.onTap,
   });
   final int index;
@@ -387,6 +399,10 @@ class _PrintCard extends StatelessWidget {
   final Uint8List? jpg;
   final bool busy;
   final bool warn;
+  final int quantity;
+  final bool canInc;
+  final VoidCallback? onInc;
+  final VoidCallback? onDec;
   final VoidCallback onTap;
 
   @override
@@ -492,6 +508,18 @@ class _PrintCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  // Copies stepper: print more than one of the same photo
+                  // (each copy counts toward the pack's total print count).
+                  Positioned(
+                    left: 8,
+                    bottom: 8,
+                    child: _QtyStepper(
+                      quantity: quantity,
+                      canInc: canInc,
+                      onInc: onInc,
+                      onDec: onDec,
+                    ),
+                  ),
                   // A round spinner in the MIDDLE of the tile while this photo
                   // re-renders after an edit — stays until the new crop appears.
                   if (busy)
@@ -585,3 +613,81 @@ class _PrintCard extends StatelessWidget {
     return Image.memory(bytes, fit: fit, gaplessPlayback: true);
   }
 }
+
+/// A compact "− N +" control on a print tile for ordering more than one copy of
+/// the same photo. Each copy counts toward the pack's total print count, so [+]
+/// is disabled once the pack is full ([canInc] false), and [−] stops at 1.
+class _QtyStepper extends StatelessWidget {
+  const _QtyStepper({
+    required this.quantity,
+    required this.canInc,
+    required this.onInc,
+    required this.onDec,
+  });
+  final int quantity;
+  final bool canInc;
+  final VoidCallback? onInc;
+  final VoidCallback? onDec;
+
+  @override
+  Widget build(BuildContext context) {
+    final canDec = quantity > 1 && onDec != null;
+    final canUp = canInc && onInc != null;
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.62),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _QtyButton(
+            icon: Icons.remove_rounded,
+            enabled: canDec,
+            onTap: canDec ? onDec : null,
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 2),
+            child: Text('×$quantity',
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800)),
+          ),
+          _QtyButton(
+            icon: Icons.add_rounded,
+            enabled: canUp,
+            onTap: canUp ? onInc : null,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QtyButton extends StatelessWidget {
+  const _QtyButton({
+    required this.icon,
+    required this.enabled,
+    required this.onTap,
+  });
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.all(5),
+        child: Icon(icon,
+            size: 16,
+            color: enabled ? Colors.white : Colors.white.withValues(alpha: 0.35)),
+      ),
+    );
+  }
+}
+

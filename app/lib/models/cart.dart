@@ -241,12 +241,13 @@ class Cart extends ChangeNotifier {
 
   void addPhotos(Iterable<String> localPaths) {
     final now = DateTime.now().millisecondsSinceEpoch;
-    // A pack holds exactly snapCount photos: the server refuses an order with
-    // more (400 too_many_photos) AFTER the customer has paid, so the cart
-    // itself never grows past the pack.
+    // A pack holds snapCount PRINTS in total — counting duplicate copies — so
+    // the cap is on [totalPrints], not the number of distinct photos. The
+    // server refuses an order with more prints (400 too_many_photos) after
+    // payment, so the cart itself never grows past the pack.
     final cap = _selectedPack?.snapCount;
     for (final path in localPaths) {
-      if (cap != null && _items.length >= cap) break;
+      if (cap != null && totalPrints >= cap) break;
       _items.add(PhotoItem(
         id: '$now-${_idSeq++}',
         localPath: path,
@@ -255,6 +256,25 @@ class Cart extends ChangeNotifier {
     _invalidatePdf();
     _persist();
     notifyListeners();
+  }
+
+  /// Set how many copies of one photo to print. Clamped to at least 1 and so
+  /// the pack's total print count ([totalPrints]) never exceeds snapCount.
+  /// Returns the value actually applied.
+  int setQuantity(String id, int wanted) {
+    final idx = _items.indexWhere((p) => p.id == id);
+    if (idx < 0) return 1;
+    final cap = _selectedPack?.snapCount;
+    final others = totalPrints - _items[idx].quantity; // prints by other photos
+    var n = wanted < 1 ? 1 : wanted;
+    if (cap != null && others + n > cap) n = cap - others;
+    if (n < 1) n = 1;
+    if (n == _items[idx].quantity) return n;
+    _items[idx].quantity = n;
+    _invalidatePdf();
+    _persist();
+    notifyListeners();
+    return n;
   }
 
   void remove(String id) {
