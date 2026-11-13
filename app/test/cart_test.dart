@@ -116,7 +116,8 @@ void main() {
       }
     });
 
-    test('ready only with a pack, a FULL pack, and every photo reviewed', () {
+    test('ready with a pack, at least one photo, and every photo reviewed — a '
+        'PARTIAL pack is allowed (pays the pack price for fewer prints)', () {
       final cart = Cart();
       cart.addPhotos(paths(2));
       expect(cart.allPhotosReady, isFalse, reason: 'no pack selected');
@@ -124,15 +125,19 @@ void main() {
       cart.selectPack(xl6);
       expect(cart.itemCount, 0, reason: 'selecting a pack starts it empty');
       cart.addPhotos(paths(5));
-      for (final i in cart.items) {
+      for (final i in cart.items.take(4)) {
         cart.setCrop(i.id, const CropEdit.skipped());
       }
       expect(cart.allPhotosReady, isFalse,
-          reason: '5 of 6 photos: the pack is not full');
+          reason: 'the 5th photo has not been reviewed');
+
+      cart.setCrop(cart.items[4].id, const CropEdit.skipped());
+      expect(cart.allPhotosReady, isTrue,
+          reason: 'a partial pack (5 of 6), every photo reviewed, is ready');
 
       cart.addPhotos(paths(1, 'last'));
       expect(cart.allPhotosReady, isFalse,
-          reason: 'the 6th photo has not been reviewed');
+          reason: 'the new photo has not been reviewed');
 
       cart.setCrop(
           cart.items.last.id,
@@ -141,7 +146,13 @@ void main() {
       expect(cart.allPhotosReady, isTrue);
 
       cart.remove(cart.items.first.id);
-      expect(cart.allPhotosReady, isFalse, reason: 'one short again');
+      expect(cart.allPhotosReady, isTrue,
+          reason: 'still ready: a partial pack with every photo reviewed');
+
+      for (final i in [...cart.items]) {
+        cart.remove(i.id);
+      }
+      expect(cart.allPhotosReady, isFalse, reason: 'no photos left');
     });
   });
 

@@ -114,7 +114,7 @@ void main() {
     viewer.transformationController!.value = matrixFor(frame);
     await tester.pump();
 
-    await tester.tap(find.text('Save · Done'));
+    await tester.tap(find.text('Save crop'));
     await tester.pump();
     await tester.pump();
     expect(find.text('PREVIEW PAGE'), findsOneWidget,
