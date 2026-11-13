@@ -239,6 +239,16 @@ class _CropScreenState extends State<CropScreen> {
     });
   }
 
+  /// "Reset": undo all zoom / pan / rotation back to the whole photo centred —
+  /// the escape hatch if the customer pans the photo off the canvas.
+  void _resetCrop(String id) {
+    setState(() {
+      _ctrlFor(id).value = Matrix4.identity();
+      _rotations[id] = 0;
+      _fitFill[id] = 0;
+    });
+  }
+
   /// "Fill": zoom the photo so it covers the whole print (crops the long edges),
   /// centred — the customer then just drags to position. Needs the photo's
   /// oriented aspect to know how much to scale up from the contain fit.
@@ -455,6 +465,7 @@ class _CropScreenState extends State<CropScreen> {
                         onZoomIn: () => _zoomBy(1.25),
                         onZoomOut: () => _zoomBy(0.8),
                         onRotate: _rotate90,
+                        onReset: () => _resetCrop(item.id),
                       ),
                     ),
                   ],
@@ -603,10 +614,12 @@ class _CropControls extends StatelessWidget {
     required this.onZoomIn,
     required this.onZoomOut,
     required this.onRotate,
+    required this.onReset,
   });
   final VoidCallback onZoomIn;
   final VoidCallback onZoomOut;
   final VoidCallback onRotate;
+  final VoidCallback onReset;
 
   @override
   Widget build(BuildContext context) {
@@ -624,6 +637,8 @@ class _CropControls extends StatelessWidget {
           _RoundIconBtn(icon: Icons.remove, onTap: onZoomOut),
           const SizedBox(height: 4),
           _RoundIconBtn(icon: Icons.rotate_right_rounded, onTap: onRotate),
+          const SizedBox(height: 4),
+          _RoundIconBtn(icon: Icons.restart_alt_rounded, onTap: onReset),
         ],
       ),
     );
