@@ -10,8 +10,18 @@ import 'package:http/http.dart' as http;
 class BackendApi {
   BackendApi._();
 
-  static const String baseUrl = 'https://130-210-24-18.nip.io';
-  static const String appToken = '278fe826b3c836ad2310568a8bd16db7';
+  // Overridable at build time with --dart-define=PP_BACKEND_URL=… /
+  // --dart-define=PP_APP_TOKEN=… so the server URL or token can be rotated
+  // without changing code. The defaults keep the current release working even
+  // when no define is passed (e.g. the existing CI build).
+  static const String baseUrl = String.fromEnvironment(
+    'PP_BACKEND_URL',
+    defaultValue: 'https://130-210-24-18.nip.io',
+  );
+  static const String appToken = String.fromEnvironment(
+    'PP_APP_TOKEN',
+    defaultValue: '278fe826b3c836ad2310568a8bd16db7',
+  );
 
   static const String _netError =
       "Couldn't verify right now. Check your internet and try again.";
