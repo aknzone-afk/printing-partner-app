@@ -1050,25 +1050,51 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         onCopied: () => _showSnack('UPI id copied'),
                       ),
                       if (paise != null) ...[
-                        const SizedBox(height: 6),
-                        TextButton.icon(
-                          onPressed:
-                              _savingQr ? null : () => _saveQr(paise / 100.0),
-                          icon: _savingQr
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child:
-                                      CircularProgressIndicator(strokeWidth: 2))
-                              : const Icon(Icons.download_rounded, size: 18),
-                          label: const Text('Save QR / open in GPay'),
+                        const SizedBox(height: 12),
+                        // The most RELIABLE way on one phone: save the QR and
+                        // scan it from the gallery inside the UPI app. Some apps
+                        // (esp. PhonePe) refuse a direct app-to-app link to a
+                        // personal UPI id, but always accept a scanned QR.
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: _savingQr
+                                ? null
+                                : () => _saveQr(paise / 100.0),
+                            icon: _savingQr
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.download_rounded, size: 20),
+                            label: const Text('Save QR to pay'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.primary,
+                              side: const BorderSide(color: AppColors.primary),
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 14),
+                            ),
+                          ),
                         ),
-                        const Text(
-                          'One phone? Save the QR, then in GPay/PhonePe tap '
-                          'Scan → pick it from your gallery.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              fontSize: 11, color: AppColors.textSecondary),
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: AppColors.lavender,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Text(
+                            'Easiest on one phone:\n'
+                            '1. Tap "Save QR to pay"\n'
+                            '2. Open GPay / PhonePe / Paytm → Scan\n'
+                            '3. Choose the saved QR from your Gallery → pay',
+                            style: TextStyle(
+                                fontSize: 12,
+                                height: 1.5,
+                                color: AppColors.primary,
+                                fontWeight: FontWeight.w600),
+                          ),
                         ),
                       ],
                     ],
@@ -1076,12 +1102,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ),
                 if (paise != null) ...[
                   const SizedBox(height: 20),
+                  const Text(
+                    'Or open an app directly (if it shows an error or a limit, '
+                    'use "Save QR to pay" above instead):',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 11, color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(height: 8),
                   _PayWithApps(
                     rupees: paise / 100.0,
                     onNotInstalled: (name) => _showSnack(
-                        '$name not found on this phone — scan the QR above or copy the UPI id'),
+                        '$name not found on this phone — use "Save QR to pay" above'),
                     onFailed: () => _showSnack(
-                        'Couldn\'t open the app — scan the QR above instead'),
+                        'Couldn\'t open the app — use "Save QR to pay" above instead'),
                   ),
                 ],
                 const SizedBox(height: 24),
