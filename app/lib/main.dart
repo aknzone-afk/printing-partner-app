@@ -23,6 +23,7 @@ import 'screens/packages_screen.dart';
 import 'screens/photo_picker_screen.dart';
 import 'screens/preview_screen.dart';
 import 'screens/upload_screen.dart';
+import 'services/firebase/push_service.dart';
 import 'theme.dart';
 
 Future<void> main() async {
@@ -50,6 +51,11 @@ Future<void> main() async {
     // No OTP — a silent anonymous sign-in gives the customer a uid for the
     // Firestore order (real identity = the mobile typed at checkout).
     await AuthService.instance.ensureSignedIn();
+    // Order-status push: register the device token + background handler and
+    // route to My Orders on a tap. Best-effort — never blocks launch (Android
+    // works once a sender exists; iOS also needs the APNs key + capability).
+    await PushService.instance
+        .init(onOpenOrder: () => _router.go('/home'));
   } catch (e, st) {
     debugPrint('[main] Firebase init / sign-in failed: $e\n$st');
   }
